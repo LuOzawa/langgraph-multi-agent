@@ -133,3 +133,35 @@ def test_checkpointer_keeps_history_per_thread():
     _, _, other = _run(["researcher", "FINISH"], thread_id="p2", app=app)
     assert len(second.messages) > len(first.messages)
     assert len(other.messages) < len(second.messages)
+
+
+def test_per_agent_step_budget(monkeypatch):
+    """每个专家可以用自己的 max_steps，未设置时跟随全局。"""
+    recorded: list[tuple[str, int]] = []
+
+    class RecordingWorker:
+        def __init__(self, tag: str):
+            self.tag = tag
+
+        def invoke(self, inputs, config=None):
+            recorded.append((self.tag, int((config or {}).get("recursion_limit", -1))))
+            return {"messages": [AIMessage(content=f"{self.tag}产出")]}
+
+    def fake_create_agent(llm, tools, system_prompt=None, **kwargs):
+        tag = "a" if "AAA" in (system_prompt or "") else "b"
+        return RecordingWorker(tag)
+
+    monkeypatch.setattr(G, "_create_agent", fake_create_agent)
+    _reset(["a", "b", "FINISH"])
+    settings = _settings(worker_max_steps=7)
+
+    from multi_agent.registry import AgentRegistry, AgentSpec
+
+    registry = AgentRegistry()
+    registry.register(AgentSpec(name="a", description="A", system_prompt="AAA", max_steps=3))
+    registry.register(AgentSpec(name="b", description="B", system_prompt="BBB"))
+
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+    G.run_task_full("任务", settings=settings, registry=registry, thread_id="budget", app=app)
+
+    assert recorded == [("a", 3), ("b", 7)]

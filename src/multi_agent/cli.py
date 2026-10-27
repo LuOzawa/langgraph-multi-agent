@@ -17,10 +17,11 @@ def _make_on_event(enabled: bool):
         messages = update.get("messages") or []
         if node == SUPERVISOR:
             turn = update.get("turn", "?")
-            nxt = update.get("next_agent", "?")
-            reason = ""
+            nxt, reason = "?", ""
             if messages:
                 text = message_text(messages[-1])
+                if "下一步 -> " in text:
+                    nxt = text.split("下一步 -> ", 1)[1].split("。", 1)[0]
                 reason = text.split("。", 1)[1] if "。" in text else ""
             suffix = f" — {reason}" if reason else ""
             print(f"  → 第 {turn} 轮：{nxt}{suffix}", flush=True)

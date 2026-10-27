@@ -13,7 +13,8 @@ ToolFactory = Callable[[], Sequence[BaseTool]]
 class AgentSpec:
     """注册一个可被 Supervisor 调度的专家 Agent。
 
-    model / temperature 为空时跟随全局 OPENAI_MODEL。
+    model / temperature 为空时跟随全局 OPENAI_MODEL；max_steps 为空时跟随全局
+    MULTI_AGENT_WORKER_STEPS（专家内部工具循环的步数上限）。
     tools_factory 每次调用都应返回新的工具列表，避免多个专家共享可变状态。
     """
 
@@ -23,6 +24,7 @@ class AgentSpec:
     tools_factory: ToolFactory = field(default=lambda: ())
     model: str | None = None
     temperature: float | None = None
+    max_steps: int | None = None
 
 
 class AgentRegistry:

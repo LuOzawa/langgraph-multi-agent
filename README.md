@@ -68,6 +68,7 @@ registry.register(
         tools_factory=workspace_tools,   # 或不给工具: lambda: ()
         model="gpt-4o",                  # 可选：专家单独指定模型
         temperature=0.2,                 # 可选
+        max_steps=8,                     # 可选：该专家内部工具循环步数上限
     )
 )
 
@@ -103,6 +104,10 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 - **失败隔离**：专家抛异常会转成一条 `[专家] 执行失败：...` 消息交回 supervisor，可换人重试。
 - **路由**：候选值由注册表动态生成 `Literal`，非法值进不了 Pydantic 校验；structured output 不可用时退化为 JSON 解析。
 - **产出**：保留原始 `AIMessage`（含 content blocks），不会把结构化内容压成字符串。
+
+## 模型/中转兼容性
+
+已对 deepseek-v4-flash 做真实探针与端到端验证：普通对话与 tool calling 可用，`response_format: json_schema` 返回 400，路由自动走 JSON 兜底并正常完成。详见 [docs/relay-compatibility.md](docs/relay-compatibility.md)。
 
 ## 测试
 

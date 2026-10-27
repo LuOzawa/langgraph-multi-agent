@@ -183,9 +183,11 @@ def build_graph(
     supervisor_llm = make_llm(settings, model=settings.supervisor_model, temperature=0)
     route_schema = _route_schema(agent_names)
     worker_graphs: dict[str, Any] = {}
+    worker_specs: dict[str, Any] = {}
 
     for name in agent_names:
         spec = registry.get(name)
+        worker_specs[name] = spec
         llm = make_llm(
             settings,
             model=spec.model,
@@ -204,7 +206,6 @@ def build_graph(
             return Command(
                 goto=END,
                 update={
-                    "next_agent": FINISH,
                     "stop_reason": "max_turns",
                     "messages": [
                         AIMessage(
@@ -223,7 +224,6 @@ def build_graph(
             return Command(
                 goto=END,
                 update={
-                    "next_agent": FINISH,
                     "stop_reason": "error",
                     "messages": [
                         AIMessage(
@@ -245,7 +245,6 @@ def build_graph(
         return Command(
             goto=END if nxt == FINISH else nxt,
             update={
-                "next_agent": nxt,
                 "turn": turn + 1,
                 "stop_reason": "finish" if nxt == FINISH else "",
                 "messages": [
@@ -260,9 +259,11 @@ def build_graph(
         def node(state: TeamState) -> Command:
             log.info("agent %s 开始", name)
             try:
+                spec = worker_specs[name]
+                budget = spec.max_steps or settings.worker_max_steps
                 result = compiled.invoke(
                     {"messages": _business_messages(state)},
-                    {"recursion_limit": settings.worker_max_steps},
+                    {"recursion_limit": budget},
                 )
             except Exception as exc:
                 log.exception("agent %s 执行失败", name)
@@ -351,7 +352,6 @@ def run_task_full(
     config = run_config(settings, tid)
     inputs = {
         "task": task,
-        "next_agent": SUPERVISOR,
         "turn": 0,
         "stop_reason": "",
         "messages": [HumanMessage(content=task)],

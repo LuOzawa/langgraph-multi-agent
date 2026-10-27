@@ -28,6 +28,28 @@ tests/
 
 流程：`START → supervisor → 某个专家 → supervisor → … → END`
 
+## 当前状态
+
+| 能力 | 状态 |
+| --- | --- |
+| Supervisor 路由（动态 `Literal` + JSON 兜底） | ✅ 完成 |
+| SQLite 检查点 / thread 多轮 | ✅ 完成 |
+| 专家失败隔离、max_turns 保护 | ✅ 完成 |
+| 人工审批（专家级 + 工具级） | ✅ 完成 |
+| 审批跨进程恢复（`--resume` / `resume_task`） | ✅ 完成 |
+| 审批审计 JSONL | ✅ 完成 |
+| 上下文 token 裁剪 | ✅ 完成 |
+| token 用量统计 | ✅ 完成 |
+| 独立任务并行（`run_parallel`） | ✅ 完成 |
+| 跨境电商示例团队 | ✅ 完成 |
+| CI（ruff + mypy + pytest，3.10–3.12） | ✅ 完成 |
+| HTTP API 服务层 | ❌ 未开始 |
+| 图内 `Send` 扇出（专家并行） | ❌ 未开始 |
+| token 级流式输出 | ❌ 未开始 |
+| 汇率 / 多币种 | ❌ 未开始 |
+| LangSmith / OTel 追踪 | ❌ 未开始 |
+| 评测集（golden tasks） | ❌ 未开始 |
+
 ## 快速开始
 
 需要 Python 3.10+（推荐 3.11）。
@@ -213,18 +235,93 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 15 个离线测试，不消耗 API
+pytest -q      # 22 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
 
-CI 在 Python 3.10 / 3.11 / 3.12 上跑同一套命令。测试覆盖：完整四跳路由、路由消息不外泄、专家失败隔离、max_turns 保护、非法路由降级、按 thread 保留历史、审批通过/拒绝/待审批、上下文裁剪、定价工具边界。
+CI 在 Python 3.10 / 3.11 / 3.12 上跑同一套命令。测试覆盖：完整四跳路由、路由消息不外泄、专家失败隔离、max_turns 保护、非法路由降级、按 thread 保留历史、审批通过/拒绝/待审批、工具级审批拦截与放行、审计落盘、并行任务、上下文裁剪、定价工具边界。
+
+## 未完成的板块（欢迎接手）
+
+按优先级排列，每条都写了入口和建议做法，方便 clone 之后直接开工。
+
+### P0 · HTTP API 服务层
+
+**现状**：只有 CLI 和 Python 库两种入口，ERP / 飞书 / 前端无法通过网络调用。
+
+**建议**：
+- 新建 `src/multi_agent/api.py`，用 FastAPI 包现有函数，不改核心
+- 端点：`POST /tasks`（提交，返回 thread_id）、`GET /tasks/{id}`（结果/状态）、`GET /approvals`（待审批列表）、`POST /approvals/{id}`（批准/拒绝）
+- 鉴权：一个 `X-API-Key` 环境变量即可，不要上完整 OAuth
+- 验收：`curl` 能走完“提交 → 待审批 → 批准 → 拿结果”闭环
+
+### P1 · 图内 `Send` 扇出
+
+**现状**：supervisor 一次只能选一个专家；多个独立子任务只能排队或走 `run_parallel`（任务级，不是图内）。
+
+**建议**：
+- 让 supervisor 返回 `[Send("agent", {...}), ...]`，或在图形层加一个 fan-out 节点
+- 注意状态合并：`messages` 有 `add_messages` 没问题，`turn` / `stop_reason` 是覆盖语义，并行分支会互相覆盖，需要改成 `Annotated[..., operator.add]` 或只让 supervisor 写
+- 验收：两个专家并发执行，总耗时接近较慢的那个
+
+### P1 · token 级流式
+
+**现状**：`on_event` 只到节点级（“谁开始/谁完成”），看不到正在写的内容。
+
+**建议**：
+- 用 `astream_events(version="v2")` 过滤 `on_chat_model_stream`
+- 在 `run_task_full` 旁加 `stream_task()` 生成器，CLI 与未来的 API 共用
+- 验收：CLI 能逐字输出最终答案
+
+### P2 · 汇率与多币种
+
+**现状**：`calc_landed_cost` 所有金额按美元输入，人民币采购价要人工换算。
+
+**建议**：
+- 加 `fx_rate`（CNY/USD）与 `fob_cny` 参数，或接一个汇率工具（注意缓存与失败降级）
+- 验收：人民币 FOB 能直接算出美元售价，汇率缺失时报错而不是静默用 1.0
+
+### P2 · 可观测性
+
+**现状**：有结构化日志和 token 统计，但没有链路追踪。
+
+**建议**：接 LangSmith（设 `LANGCHAIN_TRACING_V2` + `LANGCHAIN_API_KEY` 即可，无需改代码），或在 `run_config` 里加 `metadata` 供 OTel 使用。
+
+### P2 · 评测集
+
+**现状**：测试全是假模型，验证的是“流程对不对”，不是“答得好不好”。
+
+**建议**：建 `evals/`，放 10–20 条真实任务 + 期望要点，用真实模型跑，记录通过率与 token 成本。改 prompt 前后各跑一次。
+
+## Clone 之后的接手步骤
+
+```bash
+git clone https://github.com/LuOzawa/langgraph-multi-agent.git
+cd langgraph-multi-agent
+
+# 1. 装依赖（不需要 API key）
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
+# 2. 先跑离线测试，确认环境没问题（22 个，全部不联网）
+pytest -q
+
+# 3. 配密钥
+cp .env.example .env   # 填 OPENAI_API_KEY
+
+# 4. 验证你的中转是否兼容（假设用 deepseek）
+python tools/compat_probe.py --provider deepseek
+
+# 5. 跑一次跨境示例，确认整条链路
+python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美国站"
+```
+
+读代码的顺序：`state.py`（状态契约）→ `graph.py`（路由/审批/裁剪）→ `registry.py`（怎么加专家）→ `cli.py`（入口）。架构细节见 [docs/architecture.md](docs/architecture.md)。
 
 ## 已知取舍
 
 这是 **supervisor 路由**（每跳回中枢），适合需要统一审计与集中改规则的场景；若追求并行与低成本，官方更推荐「专家即工具」的 Subagents 模式，可在此基础上改造。
-
-当前未实现：图内 `Send` 扇出、token 级流式输出、API 服务层。
 
 ## 许可
 

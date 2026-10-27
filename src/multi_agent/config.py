@@ -45,6 +45,7 @@ class Settings:
     worker_max_steps: int
     context_max_tokens: int
     checkpoint_db: str
+    audit_log: str
     request_timeout: float
     max_retries: int
     log_level: str
@@ -66,6 +67,7 @@ class Settings:
             worker_max_steps=_int_env("MULTI_AGENT_WORKER_STEPS", 25),
             context_max_tokens=_int_env("MULTI_AGENT_CONTEXT_TOKENS", 12000, allow_zero=True),
             checkpoint_db=os.getenv("MULTI_AGENT_CHECKPOINT_DB", DEFAULT_CHECKPOINT_DB).strip(),
+            audit_log=os.getenv("MULTI_AGENT_AUDIT_LOG", ".multi_agent/approvals.jsonl").strip(),
             request_timeout=_float_env("OPENAI_TIMEOUT", 120.0),
             max_retries=_int_env("OPENAI_MAX_RETRIES", 2),
             log_level=os.getenv("MULTI_AGENT_LOG_LEVEL", "WARNING").strip().upper() or "WARNING",

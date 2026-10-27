@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multi-agent"
-version = "0.2.0"
+version = "0.3.0"
 description = "可扩展的 LangGraph 多 Agent 协作框架"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,6 +25,9 @@ multi-agent = "multi_agent.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+multi_agent = ["py.typed"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

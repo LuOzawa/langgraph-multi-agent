@@ -7,7 +7,14 @@ import uuid
 from dataclasses import replace
 
 from multi_agent.config import Settings
-from multi_agent.graph import SUPERVISOR, build_graph, message_text, run_task_full
+from multi_agent.graph import (
+    SUPERVISOR,
+    build_graph,
+    message_text,
+    pending_approval,
+    resume_task,
+    run_task_full,
+)
 
 
 def _make_on_event(enabled: bool):
@@ -59,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--auto-approve", action="store_true", help="自动批准所有人工审批（仅限调试）"
     )
+    parser.add_argument("--resume", default=None, help="恢复指定 thread 上挂起的审批")
     parser.add_argument("--log-level", default=None, help="DEBUG / INFO / WARNING")
     args = parser.parse_args(argv)
 
@@ -94,20 +102,62 @@ def main(argv: list[str] | None = None) -> int:
     on_event = _make_on_event(not args.no_stream)
     approver = None if args.auto_approve else _prompt_approval
 
-    def run(text: str) -> None:
-        result = run_task_full(
-            text,
-            settings=settings,
-            app=app,
-            thread_id=thread_id,
-            on_event=on_event,
-            approver=approver,
-            auto_approve=args.auto_approve,
-        )
+    def show(result) -> None:
         if result.pending is not None:
-            print(f"\n[待审批] {result.pending}\n", flush=True)
+            print(f"\n[待审批] {result.pending}", flush=True)
+            print(
+                f"处理：/resume y  或  /resume n <原因>；退出后可用 --resume {result.thread_id}\n",
+                flush=True,
+            )
             return
+        tokens = result.usage or {}
         print(f"\n{result.answer}\n", flush=True)
+        print(
+            f"[thread={result.thread_id} turns={result.turns} "
+            f"tokens={tokens.get('total_tokens', 0)}]\n",
+            flush=True,
+        )
+
+    def run(text: str) -> None:
+        show(
+            run_task_full(
+                text,
+                settings=settings,
+                app=app,
+                thread_id=thread_id,
+                on_event=on_event,
+                approver=approver,
+                auto_approve=args.auto_approve,
+            )
+        )
+
+    def resume(decision: dict) -> None:
+        show(
+            resume_task(
+                thread_id,
+                decision,
+                settings=settings,
+                app=app,
+                on_event=on_event,
+                approver=approver,
+                auto_approve=args.auto_approve,
+            )
+        )
+
+    if args.resume:
+        payload = pending_approval(app, args.resume)
+        if payload is None:
+            print(f"thread {args.resume} 上没有挂起的审批", file=sys.stderr)
+            return 1
+        print(f"[待审批] {payload}")
+        decision = (
+            {"approved": True, "note": "auto-approve"}
+            if args.auto_approve
+            else _prompt_approval(payload)
+        )
+        thread_id = args.resume
+        resume(decision)
+        return 0
 
     task = " ".join(args.task).strip()
     if task:
@@ -129,6 +179,16 @@ def main(argv: list[str] | None = None) -> int:
         if line == "/new":
             thread_id = f"cli-{uuid.uuid4().hex[:8]}"
             print(f"已新建会话 thread_id={thread_id}")
+            continue
+        if line == "/pending":
+            payload = pending_approval(app, thread_id)
+            print(f"挂起审批: {payload}" if payload else "当前会话没有挂起的审批")
+            continue
+        if line.startswith("/resume"):
+            parts = line.split(maxsplit=2)
+            approved = len(parts) > 1 and parts[1].lower() in {"y", "yes"}
+            note = parts[2] if len(parts) > 2 else ""
+            resume({"approved": approved, "note": note})
             continue
         run(line)
 

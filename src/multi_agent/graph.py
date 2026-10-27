@@ -15,8 +15,10 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -28,6 +30,7 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field, create_model
 
+from multi_agent.audit import record_approval
 from multi_agent.config import Settings
 from multi_agent.registry import AgentRegistry, default_registry, make_llm
 from multi_agent.state import TeamState
@@ -210,11 +213,13 @@ def make_checkpointer(path: str | None):
     db = Path(value).expanduser()
     if str(db.parent) not in {"", "."}:
         db.parent.mkdir(parents=True, exist_ok=True)
-    key = str(db.resolve())
+    # 每个线程一个连接：并发任务各自写 SQLite，避免共享连接串行化
+    key = f"{db.resolve()}::{threading.get_ident()}"
     if key not in _SAVER_CACHE:
-        connection = sqlite3.connect(key, check_same_thread=False)
+        connection = sqlite3.connect(key.split("::")[0], check_same_thread=False, timeout=30)
+        connection.execute("PRAGMA journal_mode=WAL")
         _SAVER_CACHE[key] = SqliteSaver(connection)
-        log.debug("检查点数据库: %s", key)
+        log.debug("检查点数据库: %s", key.split("::")[0])
     return _SAVER_CACHE[key]
 
 
@@ -417,6 +422,7 @@ class RunResult:
     messages: list[Any] = field(default_factory=list)
     stop_reason: str = ""
     pending: dict[str, Any] | None = None
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 EventCallback = Callable[[str, dict[str, Any]], None]
@@ -446,6 +452,20 @@ def _final_answer(state: dict[str, Any]) -> str:
     return answer
 
 
+def usage_from_state(state: dict[str, Any]) -> dict[str, int]:
+    """汇总消息里的 token 用量（模型若返回 usage_metadata）。"""
+    prompt = completion = 0
+    for message in state.get("messages") or []:
+        usage = getattr(message, "usage_metadata", None) or {}
+        prompt += int(usage.get("input_tokens") or 0)
+        completion += int(usage.get("output_tokens") or 0)
+    return {
+        "input_tokens": prompt,
+        "output_tokens": completion,
+        "total_tokens": prompt + completion,
+    }
+
+
 def _pending_payload(update: Any) -> dict[str, Any] | None:
     items = update if isinstance(update, (list, tuple)) else [update]
     if not items:
@@ -465,6 +485,7 @@ def run_task_full(
     app: Any | None = None,
     approver: Approver | None = None,
     auto_approve: bool = False,
+    _resume: Any | None = None,
 ) -> RunResult:
     settings = settings or Settings.from_env()
     app = app or build_graph(settings=settings, registry=registry)
@@ -476,8 +497,11 @@ def run_task_full(
         "stop_reason": "",
         "messages": [HumanMessage(content=task)],
     }
-    log.info("启动任务 thread_id=%s: %s", tid, task[:80])
-    next_input: Any = inputs
+    if _resume is None:
+        log.info("启动任务 thread_id=%s: %s", tid, task[:80])
+    else:
+        log.info("恢复任务 thread_id=%s", tid)
+    next_input: Any = _resume if _resume is not None else inputs
     while True:
         interrupted: Any = None
         for chunk in app.stream(next_input, config, stream_mode="updates"):
@@ -504,15 +528,20 @@ def run_task_full(
                 messages=list(state.get("messages") or []),
                 stop_reason="awaiting_approval",
                 pending=payload,
+                usage=usage_from_state(state),
             )
+        record_approval(settings=settings, thread_id=tid, payload=payload, decision=decision)
         next_input = Command(resume=decision)
     state = app.get_state(config).values or {}
+    result_usage = usage_from_state(state)
+    log.info("任务结束 thread_id=%s tokens=%s", tid, result_usage)
     return RunResult(
         answer=_final_answer(state),
         thread_id=tid,
         turns=int(state.get("turn") or 0),
         messages=list(state.get("messages") or []),
         stop_reason=str(state.get("stop_reason") or ""),
+        usage=result_usage,
     )
 
 
@@ -526,3 +555,86 @@ def run_task(
     return run_task_full(
         task, settings=settings, registry=registry, thread_id=thread_id
     ).answer
+
+
+def pending_approval(app: Any, thread_id: str) -> dict[str, Any] | None:
+    """读取某个 thread 上挂起的审批载荷；没有则返回 None。"""
+    snapshot = app.get_state({"configurable": {"thread_id": thread_id}})
+    for task in getattr(snapshot, "tasks", ()) or ():
+        for item in getattr(task, "interrupts", ()) or ():
+            value = getattr(item, "value", None)
+            if isinstance(value, dict):
+                return value
+    return None
+
+
+def resume_task(
+    thread_id: str,
+    decision: Any,
+    *,
+    settings: Settings | None = None,
+    registry: AgentRegistry | None = None,
+    app: Any | None = None,
+    on_event: EventCallback | None = None,
+    approver: Approver | None = None,
+    auto_approve: bool = False,
+) -> RunResult:
+    """从挂起的审批继续执行。
+
+    decision 形如 {"approved": True, "note": "同意"}，也可直接传 bool。
+    """
+    if isinstance(decision, bool):
+        decision = {"approved": decision}
+    return run_task_full(
+        "",
+        settings=settings,
+        registry=registry,
+        thread_id=thread_id,
+        on_event=on_event,
+        app=app,
+        approver=approver,
+        auto_approve=auto_approve,
+        _resume=Command(resume=decision),
+    )
+
+
+def run_parallel(
+    tasks: list[str],
+    *,
+    settings: Settings | None = None,
+    registry: AgentRegistry | None = None,
+    max_workers: int = 4,
+    thread_prefix: str = "job",
+    on_event: EventCallback | None = None,
+    approver: Approver | None = None,
+    auto_approve: bool = False,
+) -> list[RunResult]:
+    """并行跑多个**独立任务**（多 SKU / 多站点）。
+
+    每个任务有自己的 thread_id 与检查点连接；注意这不是图内的 Send 扇出，
+    supervisor 仍然是串行调度的，只是任务之间并行。
+    """
+    settings = settings or Settings.from_env()
+    if not tasks:
+        return []
+    results: list[RunResult | None] = [None] * len(tasks)
+
+    def work(index: int, task: str) -> tuple[int, RunResult]:
+        result = run_task_full(
+            task,
+            settings=settings,
+            registry=registry,
+            thread_id=f"{thread_prefix}-{uuid.uuid4().hex[:6]}",
+            on_event=on_event,
+            approver=approver,
+            auto_approve=auto_approve,
+        )
+        return index, result
+
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+        futures = {pool.submit(work, i, task): i for i, task in enumerate(tasks)}
+        for future in as_completed(futures):
+            index, result = future.result()
+            results[index] = result
+
+    return [item for item in results if item is not None]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
@@ -65,6 +67,7 @@ def _settings(**overrides) -> Settings:
         worker_max_steps=10,
         context_max_tokens=12000,
         checkpoint_db="memory",
+        audit_log="off",
         request_timeout=5,
         max_retries=0,
         log_level="WARNING",
@@ -270,3 +273,68 @@ def test_context_trimming_keeps_task():
     assert len(trimmed) < len(messages)
     assert trimmed[0].content.startswith("任务")
     assert G._count_tokens(FakeChatModel(), trimmed) <= 80 + 40  # 允许首条任务额外占用
+
+
+def test_pending_then_resume(monkeypatch):
+    called: list[str] = []
+    _recording_agents(monkeypatch, called)
+    _reset(["publisher", "FINISH"])
+    settings = _settings()
+    registry = _approval_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    first = G.run_task_full(
+        "把 SKU-2 上架", settings=settings, registry=registry, thread_id="ap-resume", app=app
+    )
+    assert first.stop_reason == "awaiting_approval"
+
+    payload = G.pending_approval(app, "ap-resume")
+    assert payload is not None and payload["agent"] == "publisher"
+
+    second = G.resume_task(
+        "ap-resume",
+        {"approved": True, "note": "复核通过"},
+        settings=settings,
+        registry=registry,
+        app=app,
+    )
+    assert called == ["PUBLISH"]
+    assert second.answer == "PUBLISH-产出"
+
+
+def test_audit_log_written(monkeypatch, tmp_path):
+    called: list[str] = []
+    _recording_agents(monkeypatch, called)
+    _reset(["publisher", "FINISH"])
+    audit_file = tmp_path / "approvals.jsonl"
+    settings = _settings(audit_log=str(audit_file))
+    registry = _approval_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    G.run_task_full(
+        "把 SKU-3 上架",
+        settings=settings,
+        registry=registry,
+        thread_id="ap-audit",
+        app=app,
+        approver=lambda payload: {"approved": False, "note": "合规未通过"},
+    )
+
+    lines = audit_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["agent"] == "publisher"
+    assert record["approved"] is False
+    assert record["note"] == "合规未通过"
+    assert record["thread_id"] == "ap-audit"
+
+
+def test_parallel_runs_independent_tasks():
+    _reset(["writer", "FINISH", "writer", "FINISH"])
+    settings = _settings()
+    registry = default_registry()
+    results = G.run_parallel(
+        ["任务一", "任务二"], settings=settings, registry=registry, max_workers=1
+    )
+    assert len(results) == 2
+    assert len({r.thread_id for r in results}) == 2

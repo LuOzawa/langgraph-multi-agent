@@ -11,7 +11,8 @@ src/multi_agent/
   config.py          # 环境变量与 Settings
   state.py           # 共享状态（messages / task / turn / stop_reason）
   registry.py        # Agent 注册表与模型工厂
-  graph.py           # Supervisor 图编排、检查点、路由
+  graph.py           # 图编排、检查点、路由、审批、并发
+  audit.py           # 审批审计（JSONL）
   agents/defaults.py # 示例专家
   tools/workspace.py # 示例工具（本地笔记）
   tools/ecommerce.py # 示例工具（到岸成本与定价）
@@ -70,7 +71,43 @@ AgentSpec(name="publisher", ..., requires_approval=True)
 - CLI 会提示 `批准执行？[y/N]`，拒绝时把拒绝原因交回 supervisor，由它决定换人或收尾
 - 调试时可 `multi-agent --auto-approve "..."` 跳过审批
 - 程序化调用：`run_task_full(..., approver=lambda p: {"approved": True, "note": "ok"})`
-- 不传 `approver` 也不自动批准时，返回 `stop_reason="awaiting_approval"` 与 `pending` 载荷，后续可用 `Command(resume=...)` 在同一 thread 上续跑
+- 不传 `approver` 也不自动批准时，返回 `stop_reason="awaiting_approval"` 与 `pending` 载荷
+
+### 恢复挂起的审批
+
+进程退出也不怕，状态在检查点里：
+
+```bash
+multi-agent --resume <thread_id>        # 交互式确认后继续
+multi-agent --resume <thread_id> --auto-approve   # 调试用
+```
+
+交互模式里还有 `/pending`（看当前挂起）和 `/resume y|n [备注]`。
+
+代码里：
+
+```python
+from multi_agent.graph import pending_approval, resume_task
+
+payload = pending_approval(app, thread_id)
+result = resume_task(thread_id, {"approved": True, "note": "复核通过"}, app=app)
+```
+
+### 审计日志
+
+每次审批决策追加一行 JSONL（`MULTI_AGENT_AUDIT_LOG`，默认 `.multi_agent/approvals.jsonl`）：时间、thread、专家、是否批准、备注、任务摘要。写盘失败只告警，不中断业务。
+
+## 并行任务
+
+supervisor 内部是串行调度的；但多个**独立任务**（多 SKU / 多站点）可以并行：
+
+```python
+from multi_agent.graph import run_parallel
+
+results = run_parallel(["上架 SKU-1", "上架 SKU-2"], max_workers=2)
+```
+
+每个任务独立 thread 与 SQLite 连接。这不是图内 `Send` 扇出，专家之间不会并行。
 
 ## 上下文预算
 
@@ -120,6 +157,7 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 | `MULTI_AGENT_CONTEXT_TOKENS` | 发给模型的上下文 token 预算，默认 12000；`0` 关闭裁剪 |
 | `MULTI_AGENT_CHECKPOINT_DB` | SQLite 检查点路径；`memory` 表示不落盘 |
 | `MULTI_AGENT_NOTES_DIR` | 笔记目录，默认 `notes` |
+| `MULTI_AGENT_AUDIT_LOG` | 审批审计 JSONL 路径；`off` 关闭 |
 | `MULTI_AGENT_LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING`，默认 WARNING |
 
 ## 设计约定
@@ -129,6 +167,15 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 - **失败隔离**：专家抛异常会转成一条 `[专家] 执行失败：...` 消息交回 supervisor，可换人重试。
 - **路由**：候选值由注册表动态生成 `Literal`，非法值进不了 Pydantic 校验；structured output 不可用时退化为 JSON 解析。
 - **产出**：保留原始 `AIMessage`（含 content blocks），不会把结构化内容压成字符串。
+- **用量**：`RunResult.usage` 汇总 `input_tokens / output_tokens / total_tokens`（模型返回 usage 时才有值）。
+- **审批粒度**：专家级，不是工具级；高风险专家内部的查询工具也会一起暂停。
+
+## 文档
+
+- [架构说明](docs/architecture.md)：组件图、状态契约、路由/审批/裁剪/并发
+- [接入指南](docs/integration-guide.md)：把默认团队换成自己业务的五步
+- [中转兼容性](docs/relay-compatibility.md)：真实探针结果
+- [CHANGELOG](CHANGELOG.md)
 
 ## 模型/中转兼容性
 
@@ -163,3 +210,9 @@ CI 在 Python 3.10 / 3.11 / 3.12 上跑同一套命令。测试覆盖：完整�
 ## 已知取舍
 
 这是 **supervisor 路由**（每跳回中枢），适合需要统一审计与集中改规则的场景；若追求并行与低成本，官方更推荐「专家即工具」的 Subagents 模式，可在此基础上改造。
+
+当前未实现：图内 `Send` 扇出、token 级流式输出、工具级审批、API 服务层。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。

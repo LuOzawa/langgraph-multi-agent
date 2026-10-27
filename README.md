@@ -73,6 +73,19 @@ AgentSpec(name="publisher", ..., requires_approval=True)
 - 程序化调用：`run_task_full(..., approver=lambda p: {"approved": True, "note": "ok"})`
 - 不传 `approver` 也不自动批准时，返回 `stop_reason="awaiting_approval"` 与 `pending` 载荷
 
+### 工具级审批
+
+只有真正高风险的**工具**需要停，查询类工具照常跑：
+
+    AgentSpec(
+        name="pricing",
+        ...,
+        tools_factory=lambda: [lookup_rate, update_price],
+        approval_tools=("update_price",),   # 只有改价需要人工确认
+    )
+
+机制：未批准时工具被包裹成“只回标记、不执行”；supervisor 收到标记后转审批节点，批准后把该工具加入 `approved_tools` 并重跑该专家，工具才真正执行。审批前会附带 `preview`（即将提交的内容）供人核对。
+
 ### 恢复挂起的审批
 
 进程退出也不怕，状态在检查点里：
@@ -168,7 +181,7 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 - **路由**：候选值由注册表动态生成 `Literal`，非法值进不了 Pydantic 校验；structured output 不可用时退化为 JSON 解析。
 - **产出**：保留原始 `AIMessage`（含 content blocks），不会把结构化内容压成字符串。
 - **用量**：`RunResult.usage` 汇总 `input_tokens / output_tokens / total_tokens`（模型返回 usage 时才有值）。
-- **审批粒度**：专家级，不是工具级；高风险专家内部的查询工具也会一起暂停。
+- **审批粒度**：支持专家级（`requires_approval`）与工具级（`approval_tools`）；工具级会在首次尝试时暂停并按需放行。
 
 ## 文档
 
@@ -189,7 +202,7 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 | --- | --- |
 | sourcing | 选品与供应商比价 |
 | listing | 英文标题 / 五点描述 / 搜索词 |
-| pricing | 调用 `calc_landed_cost` 算到岸成本、佣金与建议售价 |
+| pricing | 调用 `calc_landed_cost` 算到岸成本、佣金与建议售价（支持 VAT、退货率、广告费） |
 | compliance | 禁售词、认证与目的国合规 |
 | publisher | 上架发布，`requires_approval=True` |
 
@@ -211,7 +224,7 @@ CI 在 Python 3.10 / 3.11 / 3.12 上跑同一套命令。测试覆盖：完整�
 
 这是 **supervisor 路由**（每跳回中枢），适合需要统一审计与集中改规则的场景；若追求并行与低成本，官方更推荐「专家即工具」的 Subagents 模式，可在此基础上改造。
 
-当前未实现：图内 `Send` 扇出、token 级流式输出、工具级审批、API 服务层。
+当前未实现：图内 `Send` 扇出、token 级流式输出、API 服务层。
 
 ## 许可
 

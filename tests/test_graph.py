@@ -4,7 +4,7 @@ import json
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
@@ -338,3 +338,106 @@ def test_parallel_runs_independent_tasks():
     )
     assert len(results) == 2
     assert len({r.thread_id for r in results}) == 2
+
+
+# ---------------------------------------------------------------- 工具级审批
+
+
+def test_guarded_tool_blocks_until_approved():
+    from multi_agent.tools.ecommerce import calc_landed_cost
+
+    guarded = G._guarded_tool(calc_landed_cost)
+    args = {"fob_usd": 10, "freight_usd": 2, "duty_rate": 0.1, "platform_fee_rate": 0.15}
+
+    blocked = guarded.invoke(args)
+    assert blocked.startswith("REQUIRES_APPROVAL::calc_landed_cost::")
+
+    token = G._APPROVED_TOOLS.set(frozenset({"calc_landed_cost"}))
+    try:
+        allowed = guarded.invoke(args)
+    finally:
+        G._APPROVED_TOOLS.reset(token)
+    assert "到岸成本 $13.00" in allowed
+
+
+def _tool_worker(monkeypatch, calls):
+    class ToolWorker:
+        def invoke(self, inputs, config=None):
+            approved = set(G._APPROVED_TOOLS.get())
+            calls.append(sorted(approved))
+            if "calc_landed_cost" not in approved:
+                return {
+                    "messages": [
+                        ToolMessage(
+                            content='REQUIRES_APPROVAL::calc_landed_cost::{"fob_usd": 10}',
+                            tool_call_id="t1",
+                        ),
+                        AIMessage(content="需要审批"),
+                    ]
+                }
+            return {"messages": [AIMessage(content="已计算 13.00")]}
+
+    monkeypatch.setattr(
+        G, "_create_agent", lambda llm, tools, system_prompt=None, **kwargs: ToolWorker()
+    )
+
+
+def _pricing_registry():
+    from multi_agent.registry import AgentRegistry, AgentSpec
+    from multi_agent.tools.ecommerce import calc_landed_cost
+
+    registry = AgentRegistry()
+    registry.register(
+        AgentSpec(
+            name="pricing",
+            description="定价",
+            system_prompt="PRICING",
+            tools_factory=lambda: [calc_landed_cost],
+            approval_tools=("calc_landed_cost",),
+        )
+    )
+    return registry
+
+
+def test_tool_approval_approved_reruns_worker(monkeypatch):
+    calls: list[list[str]] = []
+    _tool_worker(monkeypatch, calls)
+    _reset(["pricing", "FINISH"])
+    settings = _settings()
+    registry = _pricing_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    result = G.run_task_full(
+        "算一下这个 SKU 的售价",
+        settings=settings,
+        registry=registry,
+        thread_id="tool-ok",
+        app=app,
+        approver=lambda payload: {"approved": True, "note": "同意"},
+    )
+
+    assert result.answer == "已计算 13.00"
+    assert len(calls) == 2
+    assert calls[0] == []
+    assert calls[1] == ["calc_landed_cost"]
+
+
+def test_tool_approval_rejected_stops(monkeypatch):
+    calls: list[list[str]] = []
+    _tool_worker(monkeypatch, calls)
+    _reset(["pricing", "FINISH"])
+    settings = _settings()
+    registry = _pricing_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    result = G.run_task_full(
+        "算一下这个 SKU 的售价",
+        settings=settings,
+        registry=registry,
+        thread_id="tool-no",
+        app=app,
+        approver=lambda payload: {"approved": False, "note": "价格未确认"},
+    )
+
+    assert len(calls) == 1
+    assert any("已拒绝 calc_landed_cost" in G.message_text(m) for m in result.messages)

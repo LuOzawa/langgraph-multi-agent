@@ -29,3 +29,22 @@ def test_landed_cost_rejects_bad_input():
             "target_margin": 0.5,
         }
     )
+
+
+def test_landed_cost_with_vat_returns_and_ads():
+    out = calc_landed_cost.invoke(
+        {
+            "fob_usd": 10,
+            "freight_usd": 2,
+            "duty_rate": 0.1,
+            "platform_fee_rate": 0.15,
+            "vat_rate": 0.2,
+            "return_rate": 0.05,
+            "ad_rate": 0.1,
+            "target_margin": 0.3,
+        }
+    )
+    assert "退货成本" in out
+    assert "增值税" in out
+    assert "广告费" in out
+    assert "建议售价 $54.60" in out

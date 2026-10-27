@@ -29,6 +29,7 @@ class AgentSpec:
     temperature: float | None = None
     max_steps: int | None = None
     requires_approval: bool = False
+    approval_tools: tuple[str, ...] = ()
 
 
 class AgentRegistry:

@@ -15,3 +15,5 @@ class TeamState(MessagesState):
     task: str
     turn: int
     stop_reason: str
+    pending_tool: dict
+    approved_tools: list[str]

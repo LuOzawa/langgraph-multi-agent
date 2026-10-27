@@ -44,6 +44,11 @@ AgentSpec(name="publisher", ..., requires_approval=True)
 
 选中后先 `interrupt()`，批准才执行；拒绝原因会回到 supervisor。每次决策写审计日志。
 
+只想拦单个工具（读操作放行、写操作审批）：
+
+    AgentSpec(name="pricing", ..., tools_factory=lambda: [lookup, update_price],
+              approval_tools=("update_price",))
+
 ## 4. 配置
 
 ```bash

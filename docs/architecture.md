@@ -71,8 +71,19 @@ supervisor -> approve_publisher (interrupt)
 - 图内：supervisor **串行**调度，一次一个专家
 - 图外：`run_parallel(tasks)` 用线程池跑多个**独立任务**（多 SKU / 多站点），每个任务独立 thread 与 SQLite 连接
 
+## 工具级审批
+
+`AgentSpec.approval_tools` 指定的工具在构建时被包上 `_guarded_tool`：
+
+    worker 执行 -> 工具返回 REQUIRES_APPROVAL::tool::args（未真正执行）
+                -> worker 发现标记 -> 转 approve_<agent>
+                -> 批准：approved_tools += tool -> 重跑 worker（工具真正执行）
+                -> 拒绝：回 supervisor，附拒绝原因
+
+上下文通过 `ContextVar` 传递，避免改专家状态结构；代价是首次尝试会多一轮模型调用。
+
 ## 已知限制
 
-- 审批粒度是**专家级**，不是工具级：高风险专家内部的查询类工具也会一起暂停
 - 没有图内 `Send` 扇出，专家之间不能并行
 - 回调只到节点级 `on_event`，没有 token 级流式
+- 工具级审批会多一次专家调用（先探测、后执行）

@@ -41,11 +41,21 @@ def _make_on_event(enabled: bool):
 
 def _prompt_approval(payload: dict) -> dict:
     agent = payload.get("agent", "?")
+    tool = payload.get("tool")
     reason = payload.get("reason", "")
     task = str(payload.get("task", ""))[:160]
-    print(f"\n[需要审批] {agent} — {reason}")
+    preview = str(payload.get("preview", ""))
+    label = f"{agent}/{tool}" if tool else agent
+    print(f"\n[需要审批] {label} — {reason}")
     if task:
         print(f"  任务: {task}")
+    if tool and payload.get("args"):
+        print(f"  参数: {payload['args']}")
+    if preview:
+        print("  ---- 待确认内容 ----")
+        for line in preview.splitlines()[:12]:
+            print(f"  {line}")
+        print("  --------------------")
     try:
         answer = input("  批准执行？[y/N] ").strip().lower()
         note = ""

@@ -30,7 +30,9 @@ def record_approval(
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "thread_id": thread_id,
+        "type": payload.get("type", "approval"),
         "agent": payload.get("agent"),
+        "tool": payload.get("tool"),
         "approved": bool(decision.get("approved")),
         "note": str(decision.get("note", "")),
         "task": str(payload.get("task", ""))[:500],

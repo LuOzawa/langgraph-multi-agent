@@ -19,11 +19,13 @@ import threading
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
@@ -47,6 +49,45 @@ log = logging.getLogger("multi_agent")
 
 FINISH = "FINISH"
 SUPERVISOR = "supervisor"
+_APPROVAL_MARK = "REQUIRES_APPROVAL::"
+_APPROVED_TOOLS: ContextVar[frozenset[str]] = ContextVar(
+    "multi_agent_approved_tools", default=frozenset()
+)
+
+
+def _guarded_tool(original: BaseTool) -> BaseTool:
+    """包一层审批闸：未批准时只回标记，不真正执行工具。"""
+
+    def _run(**kwargs: Any) -> Any:
+        if original.name not in _APPROVED_TOOLS.get():
+            payload = json.dumps(kwargs, ensure_ascii=False, default=str)
+            return f"{_APPROVAL_MARK}{original.name}::{payload}"
+        return original.invoke(kwargs)
+
+    return StructuredTool.from_function(
+        func=_run,
+        name=original.name,
+        description=original.description,
+        args_schema=original.args_schema,
+    )
+
+
+def _approval_markers(messages: list[Any]) -> list[tuple[str, dict[str, Any]]]:
+    """从工具返回里找出“需要审批”的标记。"""
+    found: list[tuple[str, dict[str, Any]]] = []
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        content = message.content if isinstance(message.content, str) else ""
+        if not content.startswith(_APPROVAL_MARK):
+            continue
+        try:
+            _, tool, raw = content.split("::", 2)
+            args = json.loads(raw) if raw else {}
+        except (ValueError, json.JSONDecodeError):
+            continue
+        found.append((tool, args if isinstance(args, dict) else {}))
+    return found
 
 
 def message_text(message: Any) -> str:
@@ -128,6 +169,17 @@ def _trim_for_model(messages: list[Any], llm: Any, settings: Settings) -> list[A
         ]
     log.info("上下文裁剪: %d -> %d 条（预算 %d tokens）", len(messages), len(trimmed), budget)
     return trimmed
+
+
+def _last_output(state: TeamState) -> str:
+    """给审批人看的“将要提交的内容”预览。"""
+    for message in reversed(list(state.get("messages") or [])):
+        if isinstance(message, AIMessage) and getattr(message, "name", None) not in {
+            SUPERVISOR,
+            "approval",
+        }:
+            return message_text(message)[:1500]
+    return ""
 
 
 def _route_schema(agent_names: list[str]) -> type[BaseModel]:
@@ -254,6 +306,9 @@ def build_graph(
             temperature=spec.temperature if spec.temperature is not None else 0,
         )
         tools = registry.build_tools(spec)
+        if spec.approval_tools:
+            guarded = set(spec.approval_tools)
+            tools = [_guarded_tool(item) if item.name in guarded else item for item in tools]
         if _create_agent is not None:
             worker_graphs[name] = _create_agent(llm, tools, system_prompt=spec.system_prompt)
         else:  # pragma: no cover - 兼容旧版 langgraph
@@ -320,40 +375,73 @@ def build_graph(
         """
 
         def node(state: TeamState) -> Command:
-            payload = {
-                "type": "approval",
-                "agent": name,
-                "task": state.get("task", ""),
-                "reason": f"{name} 被标记为高风险动作，需要人工确认",
-            }
+            pending = dict(state.get("pending_tool") or {})
+            tool = str(pending.get("tool") or "")
+            if tool:
+                payload = {
+                    "type": "tool_approval",
+                    "agent": name,
+                    "tool": tool,
+                    "args": pending.get("args") or {},
+                    "task": state.get("task", ""),
+                    "preview": _last_output(state),
+                    "reason": f"工具 {tool} 被标记为高风险，需要人工确认",
+                }
+            else:
+                payload = {
+                    "type": "approval",
+                    "agent": name,
+                    "task": state.get("task", ""),
+                    "preview": _last_output(state),
+                    "reason": f"{name} 被标记为高风险动作，需要人工确认",
+                }
             decision = interrupt(payload)
             if isinstance(decision, bool):
                 decision = {"approved": decision}
             approved = bool(isinstance(decision, dict) and decision.get("approved"))
             note = str(decision.get("note", "") if isinstance(decision, dict) else "")
+            if approved and tool:
+                log.info("工具审批通过: %s/%s %s", name, tool, note)
+                approved_now = list(dict.fromkeys([*(state.get("approved_tools") or []), tool]))
+                return Command(
+                    goto=name,
+                    update={
+                        "approved_tools": approved_now,
+                        "pending_tool": {},
+                        "messages": [
+                            AIMessage(
+                                content=f"[approval] 已批准工具 {tool}。{note}".strip(),
+                                name="approval",
+                            )
+                        ],
+                    },
+                )
             if approved:
                 log.info("审批通过: %s %s", name, note)
                 return Command(
                     goto=name,
                     update={
+                        "pending_tool": {},
                         "messages": [
                             AIMessage(
                                 content=f"[approval] 已批准 {name}。{note}".strip(),
                                 name="approval",
                             )
-                        ]
+                        ],
                     },
                 )
             log.info("审批拒绝: %s %s", name, note)
+            target = tool or name
             return Command(
                 goto=SUPERVISOR,
                 update={
+                    "pending_tool": {},
                     "messages": [
                         AIMessage(
-                            content=f"[approval] 已拒绝 {name}：{note or '未说明原因'}",
+                            content=f"[approval] 已拒绝 {target}：{note or '未说明原因'}",
                             name="approval",
                         )
-                    ]
+                    ],
                 },
             )
 
@@ -369,10 +457,15 @@ def build_graph(
                 spec = worker_specs[name]
                 budget = spec.max_steps or settings.worker_max_steps
                 context = _trim_for_model(_business_messages(state), supervisor_llm, settings)
-                result = compiled.invoke(
-                    {"messages": context},
-                    {"recursion_limit": budget},
-                )
+                approved = set(state.get("approved_tools") or [])
+                token = _APPROVED_TOOLS.set(frozenset(approved))
+                try:
+                    result = compiled.invoke(
+                        {"messages": context},
+                        {"recursion_limit": budget},
+                    )
+                finally:
+                    _APPROVED_TOOLS.reset(token)
             except Exception as exc:
                 log.exception("agent %s 执行失败", name)
                 return Command(
@@ -384,6 +477,27 @@ def build_graph(
                                 name=name,
                             )
                         ]
+                    },
+                )
+
+            markers = _approval_markers(list(result.get("messages") or []))
+            if markers:
+                tool_name, tool_args = markers[0]
+                log.info("工具需要审批: %s", tool_name)
+                return Command(
+                    goto=f"approve_{name}",
+                    update={
+                        "pending_tool": {
+                            "agent": name,
+                            "tool": tool_name,
+                            "args": tool_args,
+                        },
+                        "messages": [
+                            AIMessage(
+                                content=f"[{name}] 工具 {tool_name} 需要人工审批，已暂停。",
+                                name=name,
+                            )
+                        ],
                     },
                 )
 
@@ -403,7 +517,8 @@ def build_graph(
     graph = StateGraph(TeamState)
     graph.add_node(SUPERVISOR, supervisor_node)
     for name in agent_names:
-        if worker_specs[name].requires_approval:
+        spec = worker_specs[name]
+        if spec.requires_approval or spec.approval_tools:
             graph.add_node(f"approve_{name}", make_approval(name))
         graph.add_node(name, make_worker(name))
     graph.add_edge(START, SUPERVISOR)
@@ -495,6 +610,8 @@ def run_task_full(
         "task": task,
         "turn": 0,
         "stop_reason": "",
+        "pending_tool": {},
+        "approved_tools": [],
         "messages": [HumanMessage(content=task)],
     }
     if _resume is None:

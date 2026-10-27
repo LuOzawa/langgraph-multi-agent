@@ -2,6 +2,16 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循语义化版本。
 
+## [0.4.0] - 2026-10-27
+
+### Added
+- 工具级审批：`AgentSpec.approval_tools`，未批准的工具只回标记不执行，批准后重跑
+- 审批前 `preview`：把将要提交的产出附在审批载荷里
+- 定价工具支持 `vat_rate` / `return_rate` / `ad_rate`
+
+### Changed
+- 审计日志新增 `type` 与 `tool` 字段
+
 ## [0.3.0] - 2026-10-27
 
 ### Added

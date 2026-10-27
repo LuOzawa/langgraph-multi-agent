@@ -15,6 +15,9 @@ class AgentSpec:
 
     model / temperature 为空时跟随全局 OPENAI_MODEL；max_steps 为空时跟随全局
     MULTI_AGENT_WORKER_STEPS（专家内部工具循环的步数上限）。
+
+    requires_approval=True 时，supervisor 选中该专家后先进入人工审批节点，
+    批准后才真正执行（适用于上架、改价、发信等高风险动作）。
     tools_factory 每次调用都应返回新的工具列表，避免多个专家共享可变状态。
     """
 
@@ -25,6 +28,7 @@ class AgentSpec:
     model: str | None = None
     temperature: float | None = None
     max_steps: int | None = None
+    requires_approval: bool = False
 
 
 class AgentRegistry:

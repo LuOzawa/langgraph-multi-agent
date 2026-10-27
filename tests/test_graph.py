@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
@@ -63,6 +63,7 @@ def _settings(**overrides) -> Settings:
         supervisor_model="fake",
         max_turns=6,
         worker_max_steps=10,
+        context_max_tokens=12000,
         checkpoint_db="memory",
         request_timeout=5,
         max_retries=0,
@@ -165,3 +166,107 @@ def test_per_agent_step_budget(monkeypatch):
     G.run_task_full("任务", settings=settings, registry=registry, thread_id="budget", app=app)
 
     assert recorded == [("a", 3), ("b", 7)]
+
+
+# ---------------------------------------------------------------- 人工审批 / 上下文
+
+
+def _approval_registry():
+    from multi_agent.registry import AgentRegistry, AgentSpec
+
+    registry = AgentRegistry()
+    registry.register(AgentSpec(name="writer", description="写文案", system_prompt="WRITE"))
+    registry.register(
+        AgentSpec(
+            name="publisher",
+            description="上架商品（高风险）",
+            system_prompt="PUBLISH",
+            requires_approval=True,
+        )
+    )
+    return registry
+
+
+def _recording_agents(monkeypatch, called):
+    def fake_create_agent(llm, tools, system_prompt=None, **kwargs):
+        class Worker:
+            def invoke(self, inputs, config=None):
+                called.append(system_prompt)
+                return {"messages": [AIMessage(content=f"{system_prompt}-产出")]}
+
+        return Worker()
+
+    monkeypatch.setattr(G, "_create_agent", fake_create_agent)
+
+
+def test_approval_approved_runs_worker(monkeypatch):
+    called: list[str] = []
+    _recording_agents(monkeypatch, called)
+    _reset(["publisher", "FINISH"])
+    settings = _settings()
+    registry = _approval_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    result = G.run_task_full(
+        "把 SKU-1 上架",
+        settings=settings,
+        registry=registry,
+        thread_id="ap-ok",
+        app=app,
+        approver=lambda payload: {"approved": True, "note": "同意"},
+    )
+
+    assert called == ["PUBLISH"]
+    assert result.answer == "PUBLISH-产出"
+    assert any("已批准 publisher" in G.message_text(m) for m in result.messages)
+
+
+def test_approval_rejected_skips_worker(monkeypatch):
+    called: list[str] = []
+    _recording_agents(monkeypatch, called)
+    _reset(["publisher", "FINISH"])
+    settings = _settings()
+    registry = _approval_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    result = G.run_task_full(
+        "把 SKU-1 上架",
+        settings=settings,
+        registry=registry,
+        thread_id="ap-no",
+        app=app,
+        approver=lambda payload: {"approved": False, "note": "价格未确认"},
+    )
+
+    assert called == []
+    assert any("已拒绝 publisher" in G.message_text(m) for m in result.messages)
+    assert result.turns == 2  # 路由一次 + 拒绝后 FINISH
+
+
+def test_pending_approval_is_returned(monkeypatch):
+    called: list[str] = []
+    _recording_agents(monkeypatch, called)
+    _reset(["publisher", "FINISH"])
+    settings = _settings()
+    registry = _approval_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    result = G.run_task_full(
+        "把 SKU-1 上架", settings=settings, registry=registry, thread_id="ap-wait", app=app
+    )
+
+    assert result.stop_reason == "awaiting_approval"
+    assert result.pending is not None and result.pending["agent"] == "publisher"
+    assert called == []
+
+
+def test_context_trimming_keeps_task():
+    settings = _settings(context_max_tokens=80)
+    messages = [HumanMessage(content="任务" * 40)] + [
+        AIMessage(content="很长的输出" * 50, name="writer") for _ in range(8)
+    ]
+    trimmed = G._trim_for_model(messages, FakeChatModel(), settings)
+
+    assert len(trimmed) < len(messages)
+    assert trimmed[0].content.startswith("任务")
+    assert G._count_tokens(FakeChatModel(), trimmed) <= 80 + 40  # 允许首条任务额外占用

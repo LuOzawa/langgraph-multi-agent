@@ -32,6 +32,23 @@ def _make_on_event(enabled: bool):
     return on_event
 
 
+def _prompt_approval(payload: dict) -> dict:
+    agent = payload.get("agent", "?")
+    reason = payload.get("reason", "")
+    task = str(payload.get("task", ""))[:160]
+    print(f"\n[需要审批] {agent} — {reason}")
+    if task:
+        print(f"  任务: {task}")
+    try:
+        answer = input("  批准执行？[y/N] ").strip().lower()
+        note = ""
+        if answer in {"y", "yes"}:
+            note = input("  备注（可空）: ").strip()
+    except EOFError:
+        return {"approved": False, "note": "非交互环境，默认拒绝"}
+    return {"approved": answer in {"y", "yes"}, "note": note}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="多 Agent 协作 CLI")
     parser.add_argument("task", nargs="*", help="要完成的任务；省略则进入交互")
@@ -39,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default=None, help="覆盖 OPENAI_MODEL")
     parser.add_argument("--max-turns", type=int, default=None, help="覆盖 MULTI_AGENT_MAX_TURNS")
     parser.add_argument("--no-stream", action="store_true", help="不打印每轮进度")
+    parser.add_argument(
+        "--auto-approve", action="store_true", help="自动批准所有人工审批（仅限调试）"
+    )
     parser.add_argument("--log-level", default=None, help="DEBUG / INFO / WARNING")
     args = parser.parse_args(argv)
 
@@ -72,11 +92,21 @@ def main(argv: list[str] | None = None) -> int:
 
     thread_id = args.thread_id or f"cli-{uuid.uuid4().hex[:8]}"
     on_event = _make_on_event(not args.no_stream)
+    approver = None if args.auto_approve else _prompt_approval
 
     def run(text: str) -> None:
         result = run_task_full(
-            text, settings=settings, app=app, thread_id=thread_id, on_event=on_event
+            text,
+            settings=settings,
+            app=app,
+            thread_id=thread_id,
+            on_event=on_event,
+            approver=approver,
+            auto_approve=args.auto_approve,
         )
+        if result.pending is not None:
+            print(f"\n[待审批] {result.pending}\n", flush=True)
+            return
         print(f"\n{result.answer}\n", flush=True)
 
     task = " ".join(args.task).strip()

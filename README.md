@@ -1,6 +1,8 @@
 # 多 Agent 协作框架
 
-可扩展的 LangGraph 多 Agent 骨架：Supervisor 调度专家，专家可带工具，支持多轮会话与断点续跑。默认带 researcher / writer / reviewer，方便替换成自己的业务角色。
+[![CI](https://github.com/LuOzawa/langgraph-multi-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/LuOzawa/langgraph-multi-agent/actions/workflows/ci.yml)
+
+可扩展的 LangGraph 多 Agent 骨架：Supervisor 调度专家，专家可带工具，支持多轮会话、断点续跑、高风险动作人工审批与上下文预算控制。默认带 researcher / writer / reviewer，并附一套跨境电商示例团队。
 
 ## 结构
 
@@ -12,10 +14,15 @@ src/multi_agent/
   graph.py           # Supervisor 图编排、检查点、路由
   agents/defaults.py # 示例专家
   tools/workspace.py # 示例工具（本地笔记）
-  cli.py             # 命令行入口（支持多轮、进度输出）
+  tools/ecommerce.py # 示例工具（到岸成本与定价）
+  cli.py             # 命令行入口（多轮、进度、审批）
+examples/
+  ecommerce_team.py  # 跨境电商团队（含审批门）
 tests/
   test_registry.py   # 注册表行为
-  test_graph.py      # 离线假模型跑通路由/失败隔离/持久化
+  test_graph.py      # 路由/失败隔离/持久化/审批/裁剪
+  test_tools.py      # 定价工具
+.github/workflows/ci.yml
 ```
 
 流程：`START → supervisor → 某个专家 → supervisor → … → END`
@@ -50,7 +57,24 @@ python -m multi_agent
 - 默认检查点写入 `.multi_agent/checkpoints.sqlite`，按 `thread_id` 隔离。
 - 指定会话：`multi-agent --thread-id my-task "继续上次的任务"`
 - 想关掉持久化：`MULTI_AGENT_CHECKPOINT_DB=memory`
-- 有了检查点，`interrupt()` 人工审批与 `Command(resume=...)` 续跑都可以接。
+- 检查点是审批与续跑的前提，默认开启。
+
+## 人工审批（高风险动作）
+
+给专家加 `requires_approval=True`，supervisor 选中它时不会直接执行，而是先进入 `approve_<name>` 节点调用 `interrupt()` 挂起：
+
+```python
+AgentSpec(name="publisher", ..., requires_approval=True)
+```
+
+- CLI 会提示 `批准执行？[y/N]`，拒绝时把拒绝原因交回 supervisor，由它决定换人或收尾
+- 调试时可 `multi-agent --auto-approve "..."` 跳过审批
+- 程序化调用：`run_task_full(..., approver=lambda p: {"approved": True, "note": "ok"})`
+- 不传 `approver` 也不自动批准时，返回 `stop_reason="awaiting_approval"` 与 `pending` 载荷，后续可用 `Command(resume=...)` 在同一 thread 上续跑
+
+## 上下文预算
+
+长会话会把历史消息越堆越多。`MULTI_AGENT_CONTEXT_TOKENS`（默认 12000）按 token 预算裁剪历史，保留首条任务消息；设为 `0` 关闭。裁剪只影响发给模型的上下文，不删除已保存的检查点消息。
 
 ## 新增专家
 
@@ -92,7 +116,8 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 | `OPENAI_MAX_RETRIES` | 请求重试次数，默认 2 |
 | `MULTI_AGENT_SUPERVISOR_MODEL` | 路由专用模型；留空跟随 `OPENAI_MODEL` |
 | `MULTI_AGENT_MAX_TURNS` | Supervisor 最大调度次数，默认 12；触顶会返回部分结果并附提示 |
-| `MULTI_AGENT_WORKER_STEPS` | 单个专家内部最大步数，默认 25 |
+| `MULTI_AGENT_WORKER_STEPS` | 单个专家内部最大步数，默认 25（可被 `AgentSpec.max_steps` 覆盖） |
+| `MULTI_AGENT_CONTEXT_TOKENS` | 发给模型的上下文 token 预算，默认 12000；`0` 关闭裁剪 |
 | `MULTI_AGENT_CHECKPOINT_DB` | SQLite 检查点路径；`memory` 表示不落盘 |
 | `MULTI_AGENT_NOTES_DIR` | 笔记目录，默认 `notes` |
 | `MULTI_AGENT_LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING`，默认 WARNING |
@@ -109,13 +134,31 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 
 已对 deepseek-v4-flash 做真实探针与端到端验证：普通对话与 tool calling 可用，`response_format: json_schema` 返回 400，路由自动走 JSON 兜底并正常完成。详见 [docs/relay-compatibility.md](docs/relay-compatibility.md)。
 
-## 测试
+## 跨境电商示例
+
+`examples/ecommerce_team.py` 组了一个五人团队：
+
+| 专家 | 职责 |
+| --- | --- |
+| sourcing | 选品与供应商比价 |
+| listing | 英文标题 / 五点描述 / 搜索词 |
+| pricing | 调用 `calc_landed_cost` 算到岸成本、佣金与建议售价 |
+| compliance | 禁售词、认证与目的国合规 |
+| publisher | 上架发布，`requires_approval=True` |
 
 ```bash
-pytest -q
+python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美国站"
 ```
 
-测试用离线假模型（`FakeChatModel`）覆盖：完整四跳路由、专家看不到路由消息、专家失败隔离、max_turns 保护、非法路由降级、按 thread 保留历史。不消耗 API。
+## 测试与检查
+
+```bash
+pytest -q      # 15 个离线测试，不消耗 API
+ruff check .   # 静态检查
+mypy src       # 类型检查
+```
+
+CI 在 Python 3.10 / 3.11 / 3.12 上跑同一套命令。测试覆盖：完整四跳路由、路由消息不外泄、专家失败隔离、max_turns 保护、非法路由降级、按 thread 保留历史、审批通过/拒绝/待审批、上下文裁剪、定价工具边界。
 
 ## 已知取舍
 

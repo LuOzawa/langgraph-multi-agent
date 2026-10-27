@@ -16,26 +16,29 @@ import logging
 import re
 import sqlite3
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command
+from langgraph.prebuilt import create_react_agent
+from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field, create_model
 
 from multi_agent.config import Settings
 from multi_agent.registry import AgentRegistry, default_registry, make_llm
 from multi_agent.state import TeamState
 
+_create_agent: Any = None
 try:  # langchain >= 1.0 的新入口；老版本退回 langgraph.prebuilt
-    from langchain.agents import create_agent as _create_agent
-except Exception:  # pragma: no cover - 取决于安装版本
-    _create_agent = None
+    from langchain.agents import create_agent as _agent_factory
 
-from langgraph.prebuilt import create_react_agent
+    _create_agent = _agent_factory
+except Exception:  # pragma: no cover - 取决于安装版本
+    pass
 
 log = logging.getLogger("multi_agent")
 
@@ -75,6 +78,53 @@ def _business_messages(state: TeamState) -> list[Any]:
     messages = list(state.get("messages") or [])
     visible = [m for m in messages if getattr(m, "name", None) != SUPERVISOR]
     return visible or messages
+
+
+def _count_tokens(llm: Any, messages: list[Any]) -> int:
+    try:
+        return int(llm.get_num_tokens_from_messages(messages))
+    except Exception:  # 假模型/不支持计数的模型，用字符数估算
+        return sum(len(message_text(m)) for m in messages) // 2 + 1
+
+
+def _trim_for_model(messages: list[Any], llm: Any, settings: Settings) -> list[Any]:
+    """按 token 预算裁剪历史，保留首条任务消息。
+
+    MULTI_AGENT_CONTEXT_TOKENS=0 时关闭裁剪。
+    """
+    budget = settings.context_max_tokens
+    if budget <= 0 or not messages:
+        return messages
+    if _count_tokens(llm, messages) <= budget:
+        return messages
+
+    trimmed: list[Any]
+    try:
+        from langchain_core.messages import trim_messages
+
+        trimmed = list(
+            trim_messages(
+                messages,
+                max_tokens=budget,
+                strategy="last",
+                token_counter=lambda msgs: _count_tokens(llm, msgs),
+                start_on="human",
+                include_system=True,
+            )
+        )
+    except Exception:
+        log.warning("trim_messages 不可用，退回按条数裁剪")
+        trimmed = messages[-max(2, budget // 200):]
+
+    first_human = next((m for m in messages if isinstance(m, HumanMessage)), None)
+    if first_human is not None and all(m is not first_human for m in trimmed):
+        trimmed = [
+            first_human,
+            AIMessage(content="（为控制上下文长度，已省略部分较早消息）", name=SUPERVISOR),
+            *trimmed,
+        ]
+    log.info("上下文裁剪: %d -> %d 条（预算 %d tokens）", len(messages), len(trimmed), budget)
+    return trimmed
 
 
 def _route_schema(agent_names: list[str]) -> type[BaseModel]:
@@ -184,10 +234,15 @@ def build_graph(
     route_schema = _route_schema(agent_names)
     worker_graphs: dict[str, Any] = {}
     worker_specs: dict[str, Any] = {}
+    approval_targets = {
+        name: name for name in agent_names
+    }  # 默认直连；需要审批的专家在下面改写
 
     for name in agent_names:
         spec = registry.get(name)
         worker_specs[name] = spec
+        if spec.requires_approval:
+            approval_targets[name] = f"approve_{name}"
         llm = make_llm(
             settings,
             model=spec.model,
@@ -216,7 +271,7 @@ def build_graph(
                 },
             )
 
-        history = _business_messages(state)
+        history = _trim_for_model(_business_messages(state), supervisor_llm, settings)
         try:
             decision = _decide(supervisor_llm, route_schema, registry, agent_names, history)
         except Exception as exc:
@@ -243,7 +298,7 @@ def build_graph(
 
         log.info("turn %d -> %s | %s", turn + 1, nxt, reason)
         return Command(
-            goto=END if nxt == FINISH else nxt,
+            goto=END if nxt == FINISH else approval_targets[nxt],
             update={
                 "turn": turn + 1,
                 "stop_reason": "finish" if nxt == FINISH else "",
@@ -253,6 +308,53 @@ def build_graph(
             },
         )
 
+    def make_approval(name: str):
+        """高风险专家执行前的人工审批节点。
+
+        进入时调用 interrupt() 挂起；恢复时用 Command(resume={"approved": bool, "note": str})。
+        """
+
+        def node(state: TeamState) -> Command:
+            payload = {
+                "type": "approval",
+                "agent": name,
+                "task": state.get("task", ""),
+                "reason": f"{name} 被标记为高风险动作，需要人工确认",
+            }
+            decision = interrupt(payload)
+            if isinstance(decision, bool):
+                decision = {"approved": decision}
+            approved = bool(isinstance(decision, dict) and decision.get("approved"))
+            note = str(decision.get("note", "") if isinstance(decision, dict) else "")
+            if approved:
+                log.info("审批通过: %s %s", name, note)
+                return Command(
+                    goto=name,
+                    update={
+                        "messages": [
+                            AIMessage(
+                                content=f"[approval] 已批准 {name}。{note}".strip(),
+                                name="approval",
+                            )
+                        ]
+                    },
+                )
+            log.info("审批拒绝: %s %s", name, note)
+            return Command(
+                goto=SUPERVISOR,
+                update={
+                    "messages": [
+                        AIMessage(
+                            content=f"[approval] 已拒绝 {name}：{note or '未说明原因'}",
+                            name="approval",
+                        )
+                    ]
+                },
+            )
+
+        node.__name__ = f"approve_{name}_node"
+        return node
+
     def make_worker(name: str):
         compiled = worker_graphs[name]
 
@@ -261,8 +363,9 @@ def build_graph(
             try:
                 spec = worker_specs[name]
                 budget = spec.max_steps or settings.worker_max_steps
+                context = _trim_for_model(_business_messages(state), supervisor_llm, settings)
                 result = compiled.invoke(
-                    {"messages": _business_messages(state)},
+                    {"messages": context},
                     {"recursion_limit": budget},
                 )
             except Exception as exc:
@@ -295,6 +398,8 @@ def build_graph(
     graph = StateGraph(TeamState)
     graph.add_node(SUPERVISOR, supervisor_node)
     for name in agent_names:
+        if worker_specs[name].requires_approval:
+            graph.add_node(f"approve_{name}", make_approval(name))
         graph.add_node(name, make_worker(name))
     graph.add_edge(START, SUPERVISOR)
 
@@ -311,9 +416,13 @@ class RunResult:
     turns: int
     messages: list[Any] = field(default_factory=list)
     stop_reason: str = ""
+    pending: dict[str, Any] | None = None
 
 
 EventCallback = Callable[[str, dict[str, Any]], None]
+Approver = Callable[[dict[str, Any]], Any]
+
+_APPROVAL_EVENT = "__interrupt__"
 
 
 def run_config(settings: Settings, thread_id: str) -> dict[str, Any]:
@@ -337,6 +446,15 @@ def _final_answer(state: dict[str, Any]) -> str:
     return answer
 
 
+def _pending_payload(update: Any) -> dict[str, Any] | None:
+    items = update if isinstance(update, (list, tuple)) else [update]
+    if not items:
+        return None
+    first = items[0]
+    value = getattr(first, "value", first)
+    return value if isinstance(value, dict) else {"value": value}
+
+
 def run_task_full(
     task: str,
     *,
@@ -345,6 +463,8 @@ def run_task_full(
     thread_id: str | None = None,
     on_event: EventCallback | None = None,
     app: Any | None = None,
+    approver: Approver | None = None,
+    auto_approve: bool = False,
 ) -> RunResult:
     settings = settings or Settings.from_env()
     app = app or build_graph(settings=settings, registry=registry)
@@ -357,10 +477,35 @@ def run_task_full(
         "messages": [HumanMessage(content=task)],
     }
     log.info("启动任务 thread_id=%s: %s", tid, task[:80])
-    for chunk in app.stream(inputs, config, stream_mode="updates"):
-        for node, update in chunk.items():
-            if on_event is not None:
-                on_event(node, update if isinstance(update, dict) else {"value": update})
+    next_input: Any = inputs
+    while True:
+        interrupted: Any = None
+        for chunk in app.stream(next_input, config, stream_mode="updates"):
+            for node, update in chunk.items():
+                if node == _APPROVAL_EVENT:
+                    interrupted = update
+                    continue
+                if on_event is not None:
+                    on_event(node, update if isinstance(update, dict) else {"value": update})
+        if interrupted is None:
+            break
+        payload = _pending_payload(interrupted) or {}
+        log.info("等待人工审批: %s", payload.get("agent"))
+        if approver is not None:
+            decision = approver(payload)
+        elif auto_approve:
+            decision = {"approved": True, "note": "auto-approve"}
+        else:
+            state = app.get_state(config).values or {}
+            return RunResult(
+                answer=_final_answer(state),
+                thread_id=tid,
+                turns=int(state.get("turn") or 0),
+                messages=list(state.get("messages") or []),
+                stop_reason="awaiting_approval",
+                pending=payload,
+            )
+        next_input = Command(resume=decision)
     state = app.get_state(config).values or {}
     return RunResult(
         answer=_final_answer(state),

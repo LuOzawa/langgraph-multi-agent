@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-agent"
+version = "0.1.0"
+description = "可扩展的 LangGraph 多 Agent 协作框架"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "langgraph>=0.2.60",
+  "langchain>=0.3.14",
+  "langchain-openai>=0.3.0",
+  "python-dotenv>=1.0.1",
+  "pydantic>=2.9.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+multi-agent = "multi_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

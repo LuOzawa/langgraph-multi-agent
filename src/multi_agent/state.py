@@ -4,8 +4,16 @@ from langgraph.graph import MessagesState
 
 
 class TeamState(MessagesState):
-    """共享工作区状态。新增字段时保持可序列化。"""
+    """共享工作区状态。
+
+    字段语义：
+    - messages: 业务消息 + supervisor 路由记录（name="supervisor"）。专家节点不会看到路由记录。
+    - task: 当前任务原文。
+    - turn: supervisor 已调度次数，用于 max_turns 保护（覆盖语义，无 reducer）。
+    - next_agent: 上一次路由结果，仅作记录/调试；真正的跳转由 Command(goto=...) 决定。
+    """
 
     task: str
     next_agent: str
     turn: int
+    stop_reason: str

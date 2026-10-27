@@ -6,18 +6,23 @@ from dataclasses import dataclass, field
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
-
 ToolFactory = Callable[[], Sequence[BaseTool]]
 
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """注册一个可被 Supervisor 调度的专家 Agent。"""
+    """注册一个可被 Supervisor 调度的专家 Agent。
+
+    model / temperature 为空时跟随全局 OPENAI_MODEL。
+    tools_factory 每次调用都应返回新的工具列表，避免多个专家共享可变状态。
+    """
 
     name: str
     description: str
     system_prompt: str
     tools_factory: ToolFactory = field(default=lambda: ())
+    model: str | None = None
+    temperature: float | None = None
 
 
 class AgentRegistry:
@@ -37,6 +42,9 @@ class AgentRegistry:
     def names(self) -> list[str]:
         return list(self._agents)
 
+    def specs(self) -> list[AgentSpec]:
+        return list(self._agents.values())
+
     def descriptions_block(self) -> str:
         lines = [f"- {spec.name}: {spec.description}" for spec in self._agents.values()]
         return "\n".join(lines)
@@ -53,12 +61,14 @@ def default_registry() -> AgentRegistry:
     return registry
 
 
-def make_llm(settings, *, temperature: float = 0) -> BaseChatModel:
+def make_llm(settings, *, model: str | None = None, temperature: float = 0) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
-        model=settings.model,
+        model=model or settings.model,
         api_key=settings.api_key,
         base_url=settings.base_url,
         temperature=temperature,
+        timeout=settings.request_timeout,
+        max_retries=settings.max_retries,
     )

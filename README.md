@@ -12,9 +12,12 @@
 multi-agent "用三句话说明这个框架怎么扩展"
 ```
 
-## 安装
+## 快速开始（克隆到跑通）
 
-本项目**尚未发布到 PyPI**（PyPI 上的 `multi-agent` 是另一个项目），请从源码安装：
+本项目**尚未发布到 PyPI**（PyPI 上的 `multi-agent` 是另一个项目），请从源码安装。
+需要 Python 3.10+（推荐 3.11）。
+
+**1. 克隆并安装**
 
 ```bash
 git clone https://github.com/LuOzawa/langgraph-multi-agent.git
@@ -23,10 +26,70 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 # Windows: py -3.11 -m venv .venv && .venv\Scripts\activate
 
-pip install -e "."            # 运行时最小依赖
-pip install -e ".[dev]"       # 加测试与静态检查（pytest / ruff / mypy）
-pip install -e ".[api]"       # 需要 HTTP 服务时（多一个 uvicorn）
+pip install -e ".[dev]"     # 测试与静态检查；只运行可 pip install -e "."
+pip install -e ".[api]"     # 需要 HTTP 服务时（多一个 uvicorn）
 ```
+
+**2. 配置密钥**（唯一必须自己做的步骤）
+
+```bash
+cp .env.example .env
+# 编辑 .env：填 OPENAI_API_KEY；OpenAI 兼容中转改 OPENAI_BASE_URL / OPENAI_MODEL
+# 例：DeepSeek 官方 → OPENAI_BASE_URL=https://api.deepseek.com/v1、OPENAI_MODEL=deepseek-v4-flash
+# 密钥留空会直接报错，不要留 `***` 之类占位符
+```
+
+**3. 验证模型 / 中转（约 30 秒）**
+
+```bash
+python tools/compat_probe.py
+# 期望 chat ✅、tool_calling ✅；structured_output 可能 ❌（如 DeepSeek 返回 400），
+# 项目的路由会自动退化为 JSON 解析，不影响使用
+```
+
+**4. 跑第一条任务**
+
+```bash
+multi-agent "用三句话说明这个框架怎么扩展"
+```
+
+**5. 起 HTTP 服务（可选）**
+
+```bash
+multi-agent-api                      # 127.0.0.1:8000，OpenAPI 在 /docs
+curl -s localhost:8000/health        # {"status":"ok"}
+```
+
+**6. 跑离线测试（可选）**
+
+```bash
+pytest -q    # 100 passed，不联网、不消耗 token
+```
+
+## 现状与完成度
+
+自评口径：以「可稳定运行的多 Agent 框架 + 可对外使用的 HTTP 服务」为目标，按模块权重估算，
+**整体约 78%**。单条链路（clone → 填 key → 跑通）已经完整可用。
+
+| 模块 | 完成度 | 依据 | 还差 |
+| --- | --- | --- | --- |
+| 核心图（路由 / 审批 / 检查点 / 预算 / 隔离） | 100% | 100 个离线测试；真实模型 10/10 | — |
+| HTTP API（任务 / 审批 / 取消 / 持久化 / 鉴权 / 限流 / health） | 95% | 含重启恢复与并发用例 | 多副本、CORS |
+| 工程化（CI 3 版本 + packaging、类型、元数据） | 90% | CI 全绿、wheel 可装 | 覆盖率门禁、发布流程 |
+| 文档与示例 | 95% | README / docs 与实现逐项核对 | 更多行业示例 |
+| 评测（10 条用例、关键词 + judge） | 50% | 真实模型两轮 10/10 | 更大标注集、多次采样、独立 judge |
+| 生产部署（多副本 / 代理 / TLS / 可观测） | 40% | 单进程 + 令牌 + 限流 | 分布式限流、tracing、租约队列 |
+| 分发（PyPI / 版本发布） | 10% | 目前仅源码安装 | 包名冲突未解决 |
+
+### 上线前你还需要自己做的
+
+1. **换成你自己的密钥**：`.env` 里的 `OPENAI_API_KEY`（以及中转地址/模型）。
+2. **换成你的团队**：`AgentSpec` 注册自己的专家与 `system_prompt`，参考 `docs/integration-guide.md`。
+3. **对外暴露时**：前置反向代理 + TLS，设置 `MULTI_AGENT_API_TOKEN` 与
+   `MULTI_AGENT_API_RATE_LIMIT`，并把 `--task-db` 指到持久卷。
+4. **审计与备份**：`MULTI_AGENT_AUDIT_LOG` 目录做权限与保留期；备份 `.multi_agent/`
+   （检查点 + 任务表），否则重启后只能从检查点手工恢复。
+5. **评测基线**：改 prompt / 换模型前后各跑一次 `python evals/run.py`，对比通过率与 token。
 
 ## 它在解决什么
 
@@ -41,19 +104,9 @@ pip install -e ".[api]"       # 需要 HTTP 服务时（多一个 uvicorn）
 所以这个框架把上面这些都做进去了：**审批门、检查点、失败隔离、上下文裁剪、用量统计、审计流水**，
 都不是示例代码，是默认就有的行为。
 
-## 快速开始
+## 交互模式与退出码
 
-需要 Python 3.10+（推荐 3.11）。先按上一节 clone 并 `pip install -e ".[dev]"`，然后：
-
-```bash
-cp .env.example .env
-# 编辑 .env：填入 OPENAI_API_KEY；用兼容中转时改 OPENAI_BASE_URL
-# 注意：密钥留空会直接报错，不要留 `***` 之类的占位符
-
-multi-agent "用三句话说明这个框架怎么扩展"
-```
-
-交互模式（保持同一 thread，多轮上下文）：
+保持同一 thread、多轮上下文：
 
 ```bash
 python -m multi_agent
@@ -80,21 +133,29 @@ src/multi_agent/
   cli.py             # 命令行入口（多轮、进度、审批）
   api/
     __main__.py      # multi-agent-api 启动器
-    app.py           # FastAPI 应用与路由
+    app.py           # FastAPI 应用、鉴权/限流、路由
     schemas.py       # 请求 / 响应模型
     service.py       # 任务表、后台执行、审批恢复（不依赖 FastAPI）
+    store.py         # 任务表 SQLite 持久化（重启恢复）
+evals/
+  run.py             # 真实模型评测：要点打分 / --judge / token 与耗时报告
+  cases.jsonl        # 10 条评测用例
 examples/
   ecommerce_team.py  # 跨境电商团队（含审批门）
 tests/
-  test_config.py     # Settings 校验（日志级别等）
+  test_config.py     # Settings 校验（日志级别、驳回上限）
   test_cli.py        # CLI 退出码与审批提示
-  test_registry.py   # 注册表行为
-  test_graph.py      # 路由/失败隔离/持久化/审批/裁剪
+  test_registry.py   # 注册表行为与 role 校验
+  test_graph.py      # 路由/护栏/失败隔离/持久化/审批/裁剪
   test_tools.py      # 定价工具
-  test_api.py        # HTTP API（提交 / 轮询 / 审批 / 取消与回收 / 错误映射）
+  test_api.py        # HTTP API（提交 / 轮询 / 审批 / 取消与回收 / 鉴权 / 错误映射）
+  test_evals.py      # 评测打分、判分与工作区隔离
 ```
 
 流程：`START → supervisor → 某个专家 → supervisor → … → END`
+
+读代码顺序：`state.py`（状态契约）→ `graph.py`（路由 / 护栏 / 审批 / 裁剪）→ `registry.py`（怎么加专家）→
+`cli.py`（命令行入口）→ `api/`（HTTP 入口）→ `evals/run.py`（怎么衡量好坏）。
 
 ## 核心机制
 
@@ -377,33 +438,11 @@ thread_id 也带随机前缀，避免复用历史 checkpoint。
 报告写在 `evals/report.json`（`--out` 可改），含每条用例的得分、缺失要点、轮次、tokens、耗时。
 CI 不跑评测（需要真实 key 与预算），只跑离线测试；改 prompt 前后各跑一次即可对比。
 
-## 本地开发
+## 开发者补充
 
-```bash
-git clone https://github.com/LuOzawa/langgraph-multi-agent.git
-cd langgraph-multi-agent
-
-# 1. 装依赖（不需要 API key）
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-# 2. 先跑离线测试，确认环境没问题（100 个，全部不联网）
-pytest -q
-
-# 3. 配密钥
-cp .env.example .env   # 填 OPENAI_API_KEY
-
-# 4. 验证你的中转是否兼容（默认读 .env 的 OPENAI_*；也可指定 provider / 显式参数）
-python tools/compat_probe.py
-python tools/compat_probe.py --provider deepseek
-python tools/compat_probe.py --api-key sk-... --base-url https://... --model gpt-4o-mini
-
-# 5. 跑一次跨境示例，确认整条链路
-python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美国站"
-```
-
-读代码的顺序：`state.py`（状态契约）→ `graph.py`（路由/审批/裁剪）→ `registry.py`（怎么加专家）→
-`cli.py`（命令行入口）→ `api/`（HTTP 入口）。
+- 离线测试不联网、不消耗 token：`pytest -q`（100 个）；`ruff check .` 与 `mypy src` 是 CI 同款命令。
+- 示例团队需要交互确认审批，非交互环境（CI / 管道）会默认拒绝；要跑通请用真实终端或 `--auto-approve`。
+- 评测会真实调用模型并消耗 token：`python evals/run.py --limit 3`，报告落在 `evals/report.json`（已 gitignore）。
 
 ## 还没做的
 

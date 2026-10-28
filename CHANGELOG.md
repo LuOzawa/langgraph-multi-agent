@@ -41,6 +41,8 @@
 - `_decide_json` 兜底改为 `raw_decode` + 合法值清单，非法路由带清单重试一次
 - 路由硬护栏：`AgentSpec.role`（researcher/writer/reviewer/executor）+ `MULTI_AGENT_MAX_REJECTIONS`
   （默认 1）；同一专家不连任（失败重试除外），reviewer 驳回达上限后直接收尾
+- README 重组：`快速开始（克隆到跑通）` 六步清单 + `现状与完成度`（自评约 78%）+ `上线前你还需要自己做的`；
+  结构树补齐 `api/store.py`、`evals/`、`tests/test_evals.py`
 
 ### Fixed
 - 取消竞态：`DELETE` 落在「已批准、resume 未开始」之间时，已批准的高风险动作仍会执行。

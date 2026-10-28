@@ -28,6 +28,18 @@ from multi_agent.config import Settings
 from multi_agent.registry import AgentRegistry
 
 
+def _package_version() -> str:
+    """版本号只来自安装元数据（pyproject.toml），避免与 OpenAPI 双源。"""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except ImportError:  # pragma: no cover - Python < 3.8 不存在
+        return "0.0.0"
+    try:
+        return version("multi-agent")
+    except PackageNotFoundError:  # pragma: no cover - 未安装运行
+        return "0.0.0"
+
+
 def create_app(
     *,
     settings: Settings | None = None,
@@ -56,7 +68,7 @@ def create_app(
         finally:
             manager.shutdown()
 
-    app = FastAPI(title="multi-agent API", version="0.4.0", lifespan=lifespan)
+    app = FastAPI(title="multi-agent API", version=_package_version(), lifespan=lifespan)
     app.state.manager = manager
 
     @app.exception_handler(TaskNotFound)

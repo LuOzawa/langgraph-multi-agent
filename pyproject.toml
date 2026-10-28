@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,15 @@ version = "0.4.0"
 description = "可扩展的 LangGraph 多 Agent 协作框架"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Typing :: Typed",
+]
 dependencies = [
   "langgraph>=1.0.0",
   "langchain>=1.0.0",
@@ -30,6 +39,12 @@ dev = [
 [project.scripts]
 multi-agent = "multi_agent.cli:main"
 multi-agent-api = "multi_agent.api.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/LuOzawa/langgraph-multi-agent"
+Repository = "https://github.com/LuOzawa/langgraph-multi-agent"
+Issues = "https://github.com/LuOzawa/langgraph-multi-agent/issues"
+Changelog = "https://github.com/LuOzawa/langgraph-multi-agent/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]

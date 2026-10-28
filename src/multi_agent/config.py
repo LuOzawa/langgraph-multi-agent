@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -42,9 +43,12 @@ def _float_env(name: str, default: float) -> float:
     if raw is None or not raw.strip():
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise RuntimeError(f"{name} 必须是数字，当前值: {raw!r}") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise RuntimeError(f"{name} 必须是正数，当前值: {raw!r}")
+    return value
 
 
 @dataclass(frozen=True)

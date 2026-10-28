@@ -212,14 +212,15 @@ multi-agent-api --log-level DEBUG                # 默认跟随 MULTI_AGENT_LOG_
 状态机：`queued` → `running` → `completed` / `failed`，遇到高风险动作停在 `awaiting_approval`，
 批准或拒绝后回到 `running`；`DELETE`、执行超时（`--task-timeout`）或待审批过期会把任务收敛到
 `canceled`。错误码：`404` 任务不存在、`409` 任务已存在或当前不可审批或已结束、
-`503` 服务正在关闭、`422` 参数非法（空任务、非法 `thread_id`）。
+`503` 服务正在关闭或任务表已满、`422` 参数非法（空任务、非法 `thread_id`）。
 
 几点约定：
 
 - **任务表在进程内**：重启后 `GET /tasks` 不认识旧任务，但检查点在；默认团队可用 `multi-agent --resume <thread_id>` 接着跑，
   自定义 `registry` 的 thread 要在自己的脚本里用同一 registry 重新 `build_graph(registry=registry)` 再 `resume_task(...)`（CLI 只加载默认团队）；
 - **任务表会回收**：`--retention` 之后已结束任务从 `GET /tasks` 消失（再查 `404`）；表超过 `--max-records`
-  时只淘汰已结束记录，`queued` / `running` / `awaiting_approval` 不会被挤掉；待审批超过保留期转
+  时只淘汰已结束记录，`queued` / `running` / `awaiting_approval` 不会被挤掉；活跃记录占满上限后，
+  新提交返回 `503`（`detail` 含 `task table is full`），等任务结束或调大 `--max-records`；待审批超过保留期转
   `canceled`（`error="approval expired"`），记录里的图实例同时释放（SQLite 连接按线程复用，不随记录关闭）；
 - **取消是软取消**：`DELETE` 立即返回 `canceled`，但 Python 线程无法强杀，底层模型调用会继续到
   `OPENAI_TIMEOUT`（默认 120s），结果被丢弃——这期间该 worker 仍被占用；
@@ -292,7 +293,7 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 | `MULTI_AGENT_API_MAX_WORKERS` | `multi-agent-api` 并发任务数，默认 `4` |
 | `MULTI_AGENT_API_TASK_TIMEOUT` | 单任务执行超时秒数，默认 `1800`；`0` 不限 |
 | `MULTI_AGENT_API_RETENTION` | 任务记录保留秒数，默认 `86400`；`0` 关闭回收 |
-| `MULTI_AGENT_API_MAX_RECORDS` | 任务表容量上限，默认 `1000`（只淘汰已结束记录） |
+| `MULTI_AGENT_API_MAX_RECORDS` | 任务表容量上限，默认 `1000`（只淘汰已结束记录；活跃记录占满后新提交 `503`） |
 
 ## 设计约定
 
@@ -323,7 +324,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 61 个离线测试，不消耗 API
+pytest -q      # 66 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -347,7 +348,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（61 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（66 个，全部不联网）
 pytest -q
 
 # 3. 配密钥

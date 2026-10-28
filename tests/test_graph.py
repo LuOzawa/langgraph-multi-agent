@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -533,6 +534,22 @@ def test_approver_returning_bool_is_accepted(monkeypatch, tmp_path):
     assert result.answer == "PUBLISH-产出"
     rows = [json.loads(line) for line in audit.read_text("utf-8").splitlines()]
     assert len(rows) == 1 and rows[0]["approved"] is True
+
+
+def test_checkpointer_reused_per_database_path(tmp_path):
+    path = str(tmp_path / "ckpt.sqlite")
+    first = G.make_checkpointer(path)
+    from_other_thread: dict = {}
+
+    thread = threading.Thread(target=lambda: from_other_thread.setdefault("saver", G.make_checkpointer(path)))
+    thread.start()
+    thread.join(10)
+    assert not thread.is_alive()
+
+    assert from_other_thread["saver"] is first
+    keys = [key for key in G._SAVER_CACHE if key == str(Path(path).resolve())]
+    assert len(keys) == 1
+    assert G.make_checkpointer("memory") is not G.make_checkpointer("memory")
 
 
 def test_unknown_approval_tool_rejected():

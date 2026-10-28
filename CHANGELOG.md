@@ -17,6 +17,8 @@
   （`MULTI_AGENT_API_TASK_TIMEOUT` / `MULTI_AGENT_API_RETENTION` / `MULTI_AGENT_API_MAX_RECORDS`），
   执行超时与待审批过期收敛为 `canceled`，已结束记录按保留期与容量上限回收
 - `multi-agent-api --log-level`：启动器接管日志级别（默认跟随 `MULTI_AGENT_LOG_LEVEL`）
+- 节点边界取消：`run_task_full` / `resume_task` 新增 `should_cancel` 回调，命中后停止后续节点并返回
+  `stop_reason="canceled"`；API 的 `DELETE`、超时、审批过期都会给执行器发取消信号
 
 ### Changed
 - 核心图未改动：API 复用 `run_task_full` / `resume_task` / `Settings`

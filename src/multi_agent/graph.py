@@ -607,6 +607,7 @@ def run_task_full(
     app: Any | None = None,
     approver: Approver | None = None,
     auto_approve: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
     _resume: Any | None = None,
 ) -> RunResult:
     settings = settings or Settings.from_env()
@@ -626,6 +627,19 @@ def run_task_full(
     else:
         log.info("恢复任务 thread_id=%s", tid)
     next_input: Any = _resume if _resume is not None else inputs
+
+    def snapshot(stop_reason: str, pending: dict[str, Any] | None = None) -> RunResult:
+        state = app.get_state(config).values or {}
+        return RunResult(
+            answer=_final_answer(state),
+            thread_id=tid,
+            turns=int(state.get("turn") or 0),
+            messages=list(state.get("messages") or []),
+            stop_reason=stop_reason,
+            pending=pending,
+            usage=usage_from_state(state),
+        )
+
     while True:
         interrupted: Any = None
         for chunk in app.stream(next_input, config, stream_mode="updates"):
@@ -635,6 +649,9 @@ def run_task_full(
                     continue
                 if on_event is not None:
                     on_event(node, update if isinstance(update, dict) else {"value": update})
+            if should_cancel is not None and should_cancel():
+                log.info("任务已取消 thread_id=%s（节点边界）", tid)
+                return snapshot("canceled")
         if interrupted is None:
             break
         payload = _pending_payload(interrupted) or {}
@@ -644,16 +661,10 @@ def run_task_full(
         elif auto_approve:
             decision = {"approved": True, "note": "auto-approve"}
         else:
-            state = app.get_state(config).values or {}
-            return RunResult(
-                answer=_final_answer(state),
-                thread_id=tid,
-                turns=int(state.get("turn") or 0),
-                messages=list(state.get("messages") or []),
-                stop_reason="awaiting_approval",
-                pending=payload,
-                usage=usage_from_state(state),
-            )
+            if should_cancel is not None and should_cancel():
+                log.info("任务已取消 thread_id=%s（审批前）", tid)
+                return snapshot("canceled")
+            return snapshot("awaiting_approval", payload)
         if isinstance(decision, bool):
             decision = {"approved": decision}
         record_approval(settings=settings, thread_id=tid, payload=payload, decision=decision)
@@ -704,6 +715,7 @@ def resume_task(
     on_event: EventCallback | None = None,
     approver: Approver | None = None,
     auto_approve: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> RunResult:
     """从挂起的审批继续执行。
 
@@ -727,6 +739,7 @@ def resume_task(
         app=app,
         approver=approver,
         auto_approve=auto_approve,
+        should_cancel=should_cancel,
         _resume=Command(resume=decision),
     )
 

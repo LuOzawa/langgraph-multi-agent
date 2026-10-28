@@ -536,6 +536,53 @@ def test_approver_returning_bool_is_accepted(monkeypatch, tmp_path):
     assert len(rows) == 1 and rows[0]["approved"] is True
 
 
+def test_should_cancel_stops_between_nodes():
+    _reset(["writer", "writer", "FINISH"])
+    settings = _settings()
+    registry = default_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+    seen: list[str] = []
+
+    result = G.run_task_full(
+        "写两份说明",
+        settings=settings,
+        registry=registry,
+        thread_id="cancel-between",
+        app=app,
+        on_event=lambda node, update: seen.append(node),
+        should_cancel=lambda: len(seen) >= 1,
+    )
+
+    assert result.stop_reason == "canceled"
+    assert seen == ["supervisor"]  # 首个节点后即停，专家未执行
+
+
+def test_resume_task_honors_cancel(monkeypatch):
+    called: list[str] = []
+    _recording_agents(monkeypatch, called)
+    _reset(["publisher", "FINISH"])
+    settings = _settings()
+    registry = _approval_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    pending = G.run_task_full(
+        "把 SKU-1 上架", settings=settings, registry=registry, thread_id="cancel-resume", app=app
+    )
+    assert pending.stop_reason == "awaiting_approval"
+
+    resumed = G.resume_task(
+        "cancel-resume",
+        {"approved": True, "note": "同意"},
+        settings=settings,
+        registry=registry,
+        app=app,
+        should_cancel=lambda: True,
+    )
+
+    assert resumed.stop_reason == "canceled"
+    assert called == []  # 取消发生在专家执行前
+
+
 def test_checkpointer_reused_per_database_path(tmp_path):
     path = str(tmp_path / "ckpt.sqlite")
     first = G.make_checkpointer(path)

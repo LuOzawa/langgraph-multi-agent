@@ -222,8 +222,10 @@ multi-agent-api --log-level DEBUG                # 默认跟随 MULTI_AGENT_LOG_
   时只淘汰已结束记录，`queued` / `running` / `awaiting_approval` 不会被挤掉；活跃记录占满上限后，
   新提交返回 `503`（`detail` 含 `task table is full`），等任务结束或调大 `--max-records`；待审批超过保留期转
   `canceled`（`error="approval expired"`），记录里的图实例同时释放（SQLite 连接按线程复用，不随记录关闭）；
-- **取消是软取消**：`DELETE` 立即返回 `canceled`，但 Python 线程无法强杀，底层模型调用会继续到
-  `OPENAI_TIMEOUT`（默认 120s），结果被丢弃——这期间该 worker 仍被占用；
+- **取消是节点边界中断**：`DELETE`（以及 `--task-timeout` 超时、待审批过期）立即把记录置 `canceled`
+  并给执行器发取消信号，`run_task_full` / `resume_task` 在每个节点结束后检查标志，命中即停止后续节点；
+  但正在进行的那一次模型调用无法打断，会跑到它自己返回（最长 `OPENAI_TIMEOUT`，默认 120s），
+  这期间该 worker 仍被占用，返回结果被丢弃；
 - **执行超时**：`--task-timeout` 作用于 `queued` / `running`，批准审批后重新计时，超时 `error="task timed out after Ns"`；
 - **单进程**：任务并发由 `--max-workers` 控制，不要给 uvicorn 开多 worker（每个进程一份任务表）；
 - **审批串到同一条审计链路**：每次决策（含 `--resume` / `POST /approvals`）追加 JSONL（`MULTI_AGENT_AUDIT_LOG`）；
@@ -324,7 +326,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 66 个离线测试，不消耗 API
+pytest -q      # 70 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -348,7 +350,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（66 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（70 个，全部不联网）
 pytest -q
 
 # 3. 配密钥
@@ -371,9 +373,9 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 - **跨重启的任务表**：API 的任务状态只在进程内，重启后旧任务查不到（检查点仍在，可 `--resume` 接着跑）。
   要长期查询就得把任务表落到 SQLite，并把检查点表当内部实现、不对外暴露。
 - **认证与限流**：API 没有鉴权、没有 CORS、没有限流，默认只监听回环地址，对外必须靠反向代理。
-- **硬中断执行**：`DELETE` 是软取消——记录立刻变 `canceled`、结果丢弃，但底层模型调用仍在跑，
-  要等 `OPENAI_TIMEOUT` 才释放 worker。真正的节点级中断需要把取消标志传进 `on_event`
-  并在每个节点检查，属于 `LangGraphExecutor` 的改动。
+- **细粒度中断**：取消在**节点边界**生效（`run_task_full(should_cancel=...)`），正在跑的那次模型调用
+  仍会把它自己的请求做完。要在一次调用内打断，只能把 timeout 调小或在模型客户端层做；流式场景
+  需要 `astream_events` + 取消信号，属于另一套执行器。
 - **图内 `Send` 扇出**：supervisor 一次只能选一个专家，多个独立子任务只能排队或走 `run_parallel`。
   改成 `Send` 扇出要注意状态合并——`messages` 用 `add_messages` 没问题，`turn` / `stop_reason` 是覆盖语义，
   并行分支会互相覆盖，得改成 `Annotated[..., operator.add]` 或只让 supervisor 写。

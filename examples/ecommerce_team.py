@@ -30,6 +30,7 @@ def build_registry() -> AgentRegistry:
                 "你是跨境选品研究员。输出候选供应商类型、FOB 价格区间、MOQ、交期与风险点。"
                 "不要编造具体供应商，只给可核验的筛选维度。"
             ),
+            role="researcher",
         )
     )
     registry.register(
@@ -40,6 +41,7 @@ def build_registry() -> AgentRegistry:
                 "你是亚马逊 listing 文案专家。输出英文标题（不超过 200 字符）、5 条 bullet、"
                 "以及 10 个搜索词。避免夸大与医疗宣称。"
             ),
+            role="writer",
         )
     )
     registry.register(
@@ -51,6 +53,7 @@ def build_registry() -> AgentRegistry:
                 "然后给出定价区间与毛利敏感性说明。"
             ),
             tools_factory=lambda: [calc_landed_cost],
+            role="researcher",
         )
     )
     registry.register(
@@ -61,6 +64,7 @@ def build_registry() -> AgentRegistry:
                 "你是合规审查员。列出该品类在美国站需要的认证、标签与高风险表述，"
                 "并明确指出不能上架的情形。"
             ),
+            role="reviewer",
         )
     )
     registry.register(
@@ -69,6 +73,7 @@ def build_registry() -> AgentRegistry:
             description="执行上架发布（高风险，需要人工审批）。",
             system_prompt="你是发布执行员。只输出最终提交内容摘要与状态，不要改写文案。",
             requires_approval=True,
+            role="executor",
         )
     )
     return registry

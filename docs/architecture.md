@@ -40,11 +40,13 @@ flowchart LR
 2. 候选值由注册表动态生成 `Literal[...]`，模型给不出合法值就过不了校验
 3. 中转不支持 `response_format` 时（如 deepseek），自动退化为“要求输出 JSON 再解析”
 4. 非法目标或解析失败 → 终止并写明原因，不会静默当成正常完成
+5. 确定性护栏（`AgentSpec.role`）：同一专家不得连续两次被选中（失败重试除外）；
+   reviewer 驳回达到 `MULTI_AGENT_MAX_REJECTIONS`（默认 1）后直接 FINISH。命中时把原因写进路由记录
 
 ## 检查点与恢复
 
 - 默认 `SqliteSaver`，`.multi_agent/checkpoints.sqlite`，按 `thread_id` 隔离
-- 每个线程独立连接（WAL），支持并发任务各写各的
+- 同一数据库路径复用一条连接（`check_same_thread=False` + 内部锁，WAL），建连串行化避免并发锁库
 - `interrupt()` 挂起后状态落盘；`Command(resume=...)` 可从另一个进程继续
 - 读取挂起载荷：`pending_approval(app, thread_id)`
 

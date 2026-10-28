@@ -37,3 +37,13 @@ def test_reject_duplicate_and_reserved():
         raise AssertionError("should reject reserved name")
     except ValueError:
         pass
+
+
+def test_reject_invalid_role():
+    import pytest
+
+    registry = AgentRegistry()
+    with pytest.raises(ValueError, match="role"):
+        registry.register(
+            AgentSpec(name="x", description="x", system_prompt="x", role="boss")
+        )

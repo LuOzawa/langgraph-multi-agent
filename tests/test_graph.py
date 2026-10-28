@@ -677,3 +677,79 @@ def test_decide_json_retries_invalid_agent():
     assert decision.next_agent == "FINISH"
     assert len(stub.calls) == 2
     assert "只能是" in stub.calls[1]
+
+
+def _guard_registry():
+    from multi_agent.registry import AgentRegistry, AgentSpec
+
+    registry = AgentRegistry()
+    registry.register(
+        AgentSpec(name="researcher", description="调研", system_prompt="R", role="researcher")
+    )
+    registry.register(
+        AgentSpec(name="writer", description="成稿", system_prompt="W", role="writer")
+    )
+    registry.register(
+        AgentSpec(name="reviewer", description="审查", system_prompt="C", role="reviewer")
+    )
+    return registry
+
+
+def test_routing_guard_prevents_consecutive_same_agent():
+    registry = _guard_registry()
+    names = registry.names()
+
+    state = {"messages": [HumanMessage(content="任务"), AIMessage(content="结论", name="researcher")]}
+    nxt, note = G._routing_guard("researcher", state, registry, names, 1)
+    assert nxt == "writer"
+    assert "连任" in note
+
+    nxt, note = G._routing_guard(
+        "writer", {"messages": [AIMessage(content="草稿", name="writer")]}, registry, names, 1
+    )
+    assert nxt == G.FINISH
+    assert "连任" in note
+
+    nxt, note = G._routing_guard(
+        "writer",
+        {"messages": [AIMessage(content="[writer] 执行失败：boom", name="writer")]},
+        registry,
+        names,
+        1,
+    )
+    assert nxt == "writer"
+    assert note == ""
+
+
+def test_routing_guard_caps_review_rejections():
+    registry = _guard_registry()
+    names = registry.names()
+    state = {
+        "messages": [
+            AIMessage(content="草稿", name="writer"),
+            AIMessage(content="# 审查意见\n结论：需返工", name="reviewer"),
+            AIMessage(content="修订稿", name="writer"),
+        ]
+    }
+
+    assert G._routing_guard("reviewer", state, registry, names, 1)[0] == G.FINISH
+    assert G._routing_guard("reviewer", state, registry, names, 2)[0] == "reviewer"
+    assert G._routing_guard(G.FINISH, state, registry, names, 1) == (G.FINISH, "")
+
+
+def test_routing_guard_end_to_end_switches_to_writer(monkeypatch):
+    called: list[str] = []
+    _recording_agents(monkeypatch, called)
+    _reset(["researcher", "researcher", "FINISH"])
+    settings = _settings()
+    registry = default_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    result = G.run_task_full(
+        "说明一下", settings=settings, registry=registry, thread_id="guard-1", app=app
+    )
+
+    assert result.stop_reason == "finish"
+    assert len(called) == 2
+    assert called[0].startswith("你是研究员")
+    assert called[1].startswith("你是写手")

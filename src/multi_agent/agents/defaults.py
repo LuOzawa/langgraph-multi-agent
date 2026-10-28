@@ -28,6 +28,7 @@ def register_default_agents(registry: AgentRegistry) -> None:
                 "没有新事实就不要 save_note，也不要每轮新建。"
             ),
             tools_factory=workspace_tools,
+            role="researcher",
         )
     )
     registry.register(
@@ -50,6 +51,7 @@ def register_default_agents(registry: AgentRegistry) -> None:
                 "若要留存草稿用 save_note，同一标题覆盖，不按版本新建。"
             ),
             tools_factory=workspace_tools,
+            role="writer",
         )
     )
     registry.register(
@@ -77,5 +79,6 @@ def register_default_agents(registry: AgentRegistry) -> None:
                 "可用 list_notes / read_note 对照历史稿；审查本身不要新建笔记（无需 save_note）。"
             ),
             tools_factory=workspace_tools,
+            role="reviewer",
         )
     )

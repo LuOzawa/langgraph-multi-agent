@@ -36,3 +36,11 @@ def test_settings_from_env_validates_log_level(monkeypatch):
 
     monkeypatch.setenv("MULTI_AGENT_LOG_LEVEL", "info")
     assert Settings.from_env().log_level == "INFO"
+
+
+def test_max_rejections_from_env(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("MULTI_AGENT_MAX_REJECTIONS", "0")
+    assert Settings.from_env().max_rejections == 0
+    monkeypatch.setenv("MULTI_AGENT_MAX_REJECTIONS", "3")
+    assert Settings.from_env().max_rejections == 3

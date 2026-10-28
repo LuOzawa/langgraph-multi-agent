@@ -38,7 +38,7 @@ DeepSeek V4 默认开启 thinking mode（`reasoning_content`）。官方文档�
 ## 复现
 
 ```bash
-# 读 .env / OPENAI_* 环境变量（推荐，见 README 本地开发第 3 步）
+# 读 .env / OPENAI_* 环境变量（推荐，见 README「快速开始」第 3 步）
 python tools/compat_probe.py
 # 或读本机 openclaw provider 配置
 python tools/compat_probe.py --provider deepseek

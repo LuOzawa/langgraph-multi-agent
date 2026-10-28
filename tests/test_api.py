@@ -74,14 +74,27 @@ class FakeExecutor:
         self.resumes: list[tuple[str, dict[str, Any], Any]] = []
         self.app = object()
 
-    def start(self, task: str, thread_id: str) -> StartOutcome:
+    def start(
+        self,
+        task: str,
+        thread_id: str,
+        *,
+        should_cancel=None,
+    ) -> StartOutcome:
         self.starts.append((task, thread_id))
         result = self._start_result(task, thread_id)
         if isinstance(result, BaseException):
             raise result
         return StartOutcome(result=result, app=self.app)
 
-    def resume(self, thread_id: str, decision: dict[str, Any], app: Any) -> RunResult:
+    def resume(
+        self,
+        thread_id: str,
+        decision: dict[str, Any],
+        app: Any,
+        *,
+        should_cancel=None,
+    ) -> RunResult:
         self.resumes.append((thread_id, decision, app))
         return self._resume_result(thread_id, decision, app)
 
@@ -96,7 +109,9 @@ class BlockingExecutor:
         self.fail = fail
         self.app = object()
 
-    def start(self, task: str, thread_id: str) -> StartOutcome:
+    def start(
+        self, task: str, thread_id: str, *, should_cancel=None
+    ) -> StartOutcome:
         self.started.set()
         self.release.wait(5)
         self.finished.set()
@@ -104,7 +119,55 @@ class BlockingExecutor:
             raise RuntimeError("迟到失败")
         return StartOutcome(result=_completed(), app=self.app)
 
-    def resume(self, thread_id: str, decision: dict[str, Any], app: Any) -> RunResult:
+    def resume(
+        self,
+        thread_id: str,
+        decision: dict[str, Any],
+        app: Any,
+        *,
+        should_cancel=None,
+    ) -> RunResult:
+        return _completed()
+
+
+class CooperativeExecutor:
+    """模拟真实执行器：每 10ms 检查一次取消标志，命中后返回 canceled。"""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.seen = threading.Event()
+        self.done = threading.Event()
+        self.app = object()
+
+    def start(self, task: str, thread_id: str, *, should_cancel=None) -> StartOutcome:
+        self.started.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if should_cancel is not None and should_cancel():
+                self.seen.set()
+                self.done.set()
+                return StartOutcome(
+                    result=RunResult(
+                        answer="",
+                        thread_id=thread_id,
+                        turns=1,
+                        stop_reason="canceled",
+                        usage={},
+                    ),
+                    app=self.app,
+                )
+            time.sleep(0.01)
+        self.done.set()
+        return StartOutcome(result=_completed(), app=self.app)
+
+    def resume(
+        self,
+        thread_id: str,
+        decision: dict[str, Any],
+        app: Any,
+        *,
+        should_cancel=None,
+    ) -> RunResult:
         return _completed()
 
 
@@ -437,6 +500,30 @@ def test_app_version_comes_from_package_metadata():
 
     app = create_app(settings=_settings(), executor=FakeExecutor())
     assert app.version == version("multi-agent")
+
+
+def test_cancel_signals_cooperative_executor():
+    executor = CooperativeExecutor()
+    with _client(executor) as client:
+        client.post("/tasks", json={"task": "长任务", "thread_id": "t-coop"})
+        assert executor.started.wait(3)
+        assert client.delete("/tasks/t-coop").status_code == 202
+        assert executor.seen.wait(3), "执行器未收到取消信号"
+        assert executor.done.wait(3)
+        final = client.get("/tasks/t-coop").json()
+        assert final["status"] == "canceled"
+        assert final["error"] == "task canceled by client"
+
+
+def test_timeout_signals_cooperative_executor():
+    executor = CooperativeExecutor()
+    with _client(executor, task_timeout=0.05) as client:
+        client.post("/tasks", json={"task": "会超时", "thread_id": "t-coop2"})
+        assert executor.started.wait(3)
+        final = _wait(client, "t-coop2", "canceled")
+        assert final["error"] == "task timed out after 0.05s"
+        assert executor.seen.wait(3), "超时未通知执行器停下"
+        assert executor.done.wait(3)
 
 
 def test_cancel_running_task():

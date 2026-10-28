@@ -30,7 +30,7 @@ flowchart LR
 | `messages` | `add_messages` reducer，业务消息 + 路由记录 | supervisor / 专家 / 审批节点 |
 | `task` | 当前任务原文，覆盖语义 | 入口 |
 | `turn` | supervisor 已调度次数，覆盖语义 | supervisor |
-| `stop_reason` | `finish` / `max_turns` / `error` / `awaiting_approval` | supervisor |
+| `stop_reason` | `finish` / `max_turns` / `error` / `awaiting_approval` / `canceled` | supervisor |
 
 专家只接收 `name != "supervisor"` 的消息，路由话术不会污染专家上下文。
 

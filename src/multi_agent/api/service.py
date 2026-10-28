@@ -49,9 +49,22 @@ class StartOutcome:
 
 
 class Executor(Protocol):
-    def start(self, task: str, thread_id: str) -> StartOutcome: ...
+    def start(
+        self,
+        task: str,
+        thread_id: str,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> StartOutcome: ...
 
-    def resume(self, thread_id: str, decision: dict[str, Any], app: Any) -> RunResult: ...
+    def resume(
+        self,
+        thread_id: str,
+        decision: dict[str, Any],
+        app: Any,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> RunResult: ...
 
 
 class LangGraphExecutor:
@@ -73,7 +86,13 @@ class LangGraphExecutor:
             lambda: build_graph(settings=self._settings, registry=self._registry)
         )
 
-    def start(self, task: str, thread_id: str) -> StartOutcome:
+    def start(
+        self,
+        task: str,
+        thread_id: str,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> StartOutcome:
         app = self._app_factory()
         result = run_task_full(
             task,
@@ -81,16 +100,25 @@ class LangGraphExecutor:
             registry=self._registry,
             thread_id=thread_id,
             app=app,
+            should_cancel=should_cancel,
         )
         return StartOutcome(result=result, app=app)
 
-    def resume(self, thread_id: str, decision: dict[str, Any], app: Any) -> RunResult:
+    def resume(
+        self,
+        thread_id: str,
+        decision: dict[str, Any],
+        app: Any,
+        *,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> RunResult:
         return resume_task(
             thread_id,
             decision,
             settings=self._settings,
             registry=self._registry,
             app=app,
+            should_cancel=should_cancel,
         )
 
 
@@ -111,6 +139,7 @@ class _TaskRecord:
     error: str | None = None
     app: Any | None = field(default=None, repr=False)
     deadline: float | None = None
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)
 
@@ -315,8 +344,11 @@ class TaskManager:
                 return
             record.status = TaskStatus.RUNNING
             record.updated_at = _now()
+            cancel_event = record.cancel_event
         try:
-            outcome = self._executor.start(task, thread_id)
+            outcome = self._executor.start(
+                task, thread_id, should_cancel=cancel_event.is_set
+            )
             self._apply(thread_id, outcome.result, outcome.app)
         except Exception as exc:
             logger.exception("task %s failed", thread_id)
@@ -330,8 +362,11 @@ class TaskManager:
             current = self._records.get(thread_id)
             if current is None or current.status is not TaskStatus.RUNNING:
                 return  # 已取消 / 超时的任务不得再执行已批准的审批
+            cancel_event = current.cancel_event
         try:
-            result = self._executor.resume(thread_id, decision, app)
+            result = self._executor.resume(
+                thread_id, decision, app, should_cancel=cancel_event.is_set
+            )
             self._apply(thread_id, result, app)
         except Exception as exc:
             logger.exception("task %s failed", thread_id)
@@ -358,6 +393,8 @@ class TaskManager:
                 record.app = app
             elif result.stop_reason == "awaiting_approval":
                 self._mark_failed(record, "awaiting_approval without pending payload")
+            elif result.stop_reason == "canceled":
+                self._mark_canceled(record, "task canceled")
             elif result.stop_reason == "error":
                 self._mark_failed(record, result.answer or "task failed")
             else:
@@ -383,6 +420,7 @@ class TaskManager:
         record.pending = None
         record.app = None
         record.deadline = None
+        record.cancel_event.set()  # 让正在跑的图在下一个节点边界停下
         record.updated_at = _now()
 
     def _deadline(self) -> float | None:

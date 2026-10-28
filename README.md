@@ -336,7 +336,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 86 个离线测试，不消耗 API
+pytest -q      # 87 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -380,7 +380,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（86 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（87 个，全部不联网）
 pytest -q
 
 # 3. 配密钥

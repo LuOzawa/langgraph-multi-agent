@@ -203,7 +203,8 @@ def test_main_writes_report_and_strict_exit(monkeypatch, tmp_path):
 
 def test_main_requires_api_key(monkeypatch, tmp_path):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.chdir(tmp_path)  # 避开仓库里的 .env
+    monkeypatch.setattr(ev, "load_dotenv", lambda: None)  # 不读本机 .env
+    monkeypatch.chdir(tmp_path)
     cases = tmp_path / "cases.jsonl"
     cases.write_text('{"id": "a", "task": "t", "points": [["x"]]}\n', "utf-8")
 

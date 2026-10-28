@@ -52,6 +52,8 @@
 - 打包：补 `license` / `classifiers` / `[project.urls]`（wheel 带 `License-Expression: MIT`），
   CI 增加 packaging job（build → 干净 venv 安装 `[api]` wheel → 校验入口与版本）
 - API 版本号改为读取安装元数据，避免 `pyproject.toml` 与 `/openapi.json` 双源
+- 并发建图时的检查点连接创建串行化（多个 worker 同时执行 `PRAGMA journal_mode=WAL`
+  曾报 `database is locked`）
 
 ## [0.4.0] - 2026-10-27
 

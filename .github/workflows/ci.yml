@@ -26,3 +26,41 @@ jobs:
         run: mypy src
       - name: Test
         run: pytest -q
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build wheel and sdist
+        run: |
+          pip install build
+          python -m build
+      - name: Install wheel with api extra (clean venv)
+        run: |
+          python -m venv /tmp/wheel-venv
+          wheel=$(ls dist/*.whl)
+          /tmp/wheel-venv/bin/pip install "${wheel}[api]"
+      - name: Check wheel contents and entry points
+        run: |
+          /tmp/wheel-venv/bin/python - <<'PY'
+          import multi_agent.api.app  # noqa: F401  确认 api 子包被打包
+          import uvicorn  # noqa: F401               确认 [api] extra 生效
+          from importlib.metadata import version
+          from multi_agent.api.app import create_app
+          from multi_agent.config import Settings
+
+          settings = Settings(
+              api_key="test", base_url="http://example.invalid/v1", model="fake",
+              supervisor_model="fake", max_turns=1, worker_max_steps=1,
+              context_max_tokens=0, checkpoint_db="memory", audit_log="off",
+              request_timeout=1, max_retries=0, log_level="WARNING",
+          )
+          assert create_app(settings=settings).version == version("multi-agent")
+          assert version("multi-agent") == "0.4.0"
+          print("wheel ok:", version("multi-agent"))
+          PY
+          /tmp/wheel-venv/bin/multi-agent --help > /dev/null
+          /tmp/wheel-venv/bin/multi-agent-api --help > /dev/null

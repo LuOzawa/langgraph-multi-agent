@@ -405,6 +405,40 @@ def test_shutdown_returns_503():
         assert executor.starts == []
 
 
+def test_non_finite_lifecycle_values_rejected():
+    for kwargs in (
+        {"task_timeout": float("nan")},
+        {"retention": float("inf")},
+        {"task_timeout": -1},
+        {"retention": -0.5},
+    ):
+        with pytest.raises(ValueError):
+            create_app(settings=_settings(), executor=FakeExecutor(), **kwargs)
+
+
+def test_table_full_rejects_new_submit():
+    executor = BlockingExecutor()
+    with _client(executor, max_workers=1, max_records=1, task_timeout=0) as client:
+        assert client.post("/tasks", json={"task": "占位", "thread_id": "t-full1"}).status_code == 202
+        assert executor.started.wait(3)
+
+        response = client.post("/tasks", json={"task": "挤不进来", "thread_id": "t-full2"})
+        assert response.status_code == 503, response.text
+        assert "task table is full" in response.json()["detail"]
+
+        assert client.delete("/tasks/t-full1").status_code == 202
+        executor.release.set()
+        assert executor.finished.wait(3)
+        assert client.post("/tasks", json={"task": "腾出位置", "thread_id": "t-full3"}).status_code == 202
+
+
+def test_app_version_comes_from_package_metadata():
+    from importlib.metadata import version
+
+    app = create_app(settings=_settings(), executor=FakeExecutor())
+    assert app.version == version("multi-agent")
+
+
 def test_cancel_running_task():
     executor = BlockingExecutor()
     with _client(executor) as client:

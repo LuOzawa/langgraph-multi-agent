@@ -15,7 +15,6 @@ import json
 import logging
 import re
 import sqlite3
-import threading
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -265,13 +264,14 @@ def make_checkpointer(path: str | None):
     db = Path(value).expanduser()
     if str(db.parent) not in {"", "."}:
         db.parent.mkdir(parents=True, exist_ok=True)
-    # 每个线程一个连接：并发任务各自写 SQLite，避免共享连接串行化
-    key = f"{db.resolve()}::{threading.get_ident()}"
+    # 每个数据库路径一个连接：SqliteSaver 已用 check_same_thread=False + 内部锁保证线程安全，
+    # 按线程拆分只会让连接数随线程数增长且永不关闭。
+    key = str(db.resolve())
     if key not in _SAVER_CACHE:
-        connection = sqlite3.connect(key.split("::")[0], check_same_thread=False, timeout=30)
+        connection = sqlite3.connect(key, check_same_thread=False, timeout=30)
         connection.execute("PRAGMA journal_mode=WAL")
         _SAVER_CACHE[key] = SqliteSaver(connection)
-        log.debug("检查点数据库: %s", key.split("::")[0])
+        log.debug("检查点数据库: %s", key)
     return _SAVER_CACHE[key]
 
 

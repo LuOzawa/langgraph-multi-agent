@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import sys
 
@@ -46,8 +47,8 @@ def _env_float(name: str, default: float, *, low: float) -> float:
         value = float(raw.strip())
     except ValueError as exc:
         raise ValueError(f"{name} 必须是数字，当前值: {raw!r}") from exc
-    if value < low:
-        raise ValueError(f"{name} 必须 >= {low:g}，当前值: {value:g}")
+    if not math.isfinite(value) or value < low:
+        raise ValueError(f"{name} 必须是 >= {low:g} 的有限数，当前值: {raw!r}")
     return value
 
 
@@ -124,15 +125,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.task_timeout is not None
             else _env_float("MULTI_AGENT_API_TASK_TIMEOUT", DEFAULT_TASK_TIMEOUT, low=0.0)
         )
-        if task_timeout < 0:
-            raise ValueError(f"--task-timeout 必须 >= 0，当前值: {task_timeout:g}")
+        if not math.isfinite(task_timeout) or task_timeout < 0:
+            raise ValueError(f"--task-timeout 必须是 >= 0 的有限数，当前值: {task_timeout:g}")
         retention = (
             args.retention
             if args.retention is not None
             else _env_float("MULTI_AGENT_API_RETENTION", DEFAULT_RETENTION, low=0.0)
         )
-        if retention < 0:
-            raise ValueError(f"--retention 必须 >= 0，当前值: {retention:g}")
+        if not math.isfinite(retention) or retention < 0:
+            raise ValueError(f"--retention 必须是 >= 0 的有限数，当前值: {retention:g}")
         records = (
             args.max_records
             if args.max_records is not None

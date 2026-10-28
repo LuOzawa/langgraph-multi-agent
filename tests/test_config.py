@@ -20,6 +20,14 @@ def test_normalize_log_level_rejects_unknown():
     assert "CRITICAL" in message
 
 
+def test_settings_from_env_rejects_non_finite_timeout(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    for raw in ("nan", "inf", "-1", "0"):
+        monkeypatch.setenv("OPENAI_TIMEOUT", raw)
+        with pytest.raises(RuntimeError, match="OPENAI_TIMEOUT"):
+            Settings.from_env()
+
+
 def test_settings_from_env_validates_log_level(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     monkeypatch.setenv("MULTI_AGENT_LOG_LEVEL", "noisy")

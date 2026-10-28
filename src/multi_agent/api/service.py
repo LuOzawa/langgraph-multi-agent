@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 import uuid
@@ -128,10 +129,10 @@ class TaskManager:
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be >= 1")
-        if task_timeout < 0:
-            raise ValueError("task_timeout must be >= 0")
-        if retention < 0:
-            raise ValueError("retention must be >= 0")
+        if not math.isfinite(task_timeout) or task_timeout < 0:
+            raise ValueError("task_timeout must be a finite number >= 0")
+        if not math.isfinite(retention) or retention < 0:
+            raise ValueError("retention must be a finite number >= 0")
         if max_records < 1:
             raise ValueError("max_records must be >= 1")
         self._executor = executor
@@ -198,6 +199,13 @@ class TaskManager:
             tid = thread_id or f"api-{uuid.uuid4().hex[:8]}"
             if tid in self._records:
                 raise TaskConflict("task already exists")
+            if len(self._records) >= self._max_records and not any(
+                record.status in TERMINAL_STATUSES for record in self._records.values()
+            ):
+                raise TaskUnavailable(
+                    f"task table is full ({self._max_records} active records); "
+                    "wait for tasks to finish or raise --max-records"
+                )
             record = _TaskRecord(thread_id=tid, task=task, deadline=self._deadline())
             self._records[tid] = record
             self._sweep_locked()

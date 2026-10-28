@@ -35,6 +35,13 @@
 - `approver` 返回 bool 时审计不再抛 `AttributeError`
 - 空的 `MULTI_AGENT_API_HOST=` 不再让 uvicorn 绑到 `0.0.0.0`；`--log-level` 现在同时控制 uvicorn 日志
 - `tools/compat_probe.py` 支持 `.env` / `OPENAI_*`，缺配置时给出用法提示而非 traceback
+- 非有限数值校验：`--task-timeout nan`、`--retention nan/inf`、`OPENAI_TIMEOUT=nan/0/-1`
+  启动即报错（原先 NaN 会静默关掉超时与回收）
+- 检查点连接按数据库路径复用（原先按线程拆分且永不关闭，长驻进程 fd 单调增长）
+- 任务表满（活跃记录达到 `--max-records`）时新提交返回 `503`，不再无界增长
+- 打包：补 `license` / `classifiers` / `[project.urls]`（wheel 带 `License-Expression: MIT`），
+  CI 增加 packaging job（build → 干净 venv 安装 `[api]` wheel → 校验入口与版本）
+- API 版本号改为读取安装元数据，避免 `pyproject.toml` 与 `/openapi.json` 双源
 
 ## [0.4.0] - 2026-10-27
 

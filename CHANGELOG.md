@@ -21,6 +21,8 @@
 ### Changed
 - 核心图未改动：API 复用 `run_task_full` / `resume_task` / `Settings`
 - API 新增状态 `canceled`；`DELETE`、超时、审批过期都落在该状态，迟到结果不会复活任务
+- 日志级别统一校验：`MULTI_AGENT_LOG_LEVEL` 与 `--log-level` 非法时启动即报错（CLI 原先静默退回 WARNING），
+  可选 `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`
 
 ## [0.4.0] - 2026-10-27
 

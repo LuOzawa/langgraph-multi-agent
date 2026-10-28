@@ -11,6 +11,18 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_CHECKPOINT_DB = ".multi_agent/checkpoints.sqlite"
 
+_LEVEL_ORDER = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def normalize_log_level(value: str | None) -> str:
+    """把日志级别归一化；非法值直接报错，避免静默退回 WARNING。"""
+    level = (value or "").strip().upper() or "WARNING"
+    if level not in _LEVEL_ORDER:
+        raise RuntimeError(
+            f"日志级别非法，当前值: {value!r}（可选 {' / '.join(_LEVEL_ORDER)}）"
+        )
+    return level
+
 
 def _int_env(name: str, default: int, *, allow_zero: bool = False) -> int:
     raw = os.getenv(name)
@@ -70,5 +82,5 @@ class Settings:
             audit_log=os.getenv("MULTI_AGENT_AUDIT_LOG", ".multi_agent/approvals.jsonl").strip(),
             request_timeout=_float_env("OPENAI_TIMEOUT", 120.0),
             max_retries=_int_env("OPENAI_MAX_RETRIES", 2),
-            log_level=os.getenv("MULTI_AGENT_LOG_LEVEL", "WARNING").strip().upper() or "WARNING",
+            log_level=normalize_log_level(os.getenv("MULTI_AGENT_LOG_LEVEL")),
         )

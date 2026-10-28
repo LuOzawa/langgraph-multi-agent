@@ -6,7 +6,7 @@ import sys
 import uuid
 from dataclasses import replace
 
-from multi_agent.config import Settings
+from multi_agent.config import Settings, normalize_log_level
 from multi_agent.graph import (
     SUPERVISOR,
     build_graph,
@@ -77,7 +77,9 @@ def main(argv: list[str] | None = None) -> int:
         "--auto-approve", action="store_true", help="自动批准所有人工审批（仅限调试）"
     )
     parser.add_argument("--resume", default=None, help="恢复指定 thread 上挂起的审批")
-    parser.add_argument("--log-level", default=None, help="DEBUG / INFO / WARNING")
+    parser.add_argument(
+        "--log-level", default=None, help="DEBUG / INFO / WARNING / ERROR / CRITICAL"
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -96,9 +98,13 @@ def main(argv: list[str] | None = None) -> int:
     if overrides:
         settings = replace(settings, **overrides)
 
-    level = (args.log_level or settings.log_level or "WARNING").upper()
+    try:
+        level = normalize_log_level(args.log_level or settings.log_level)
+    except RuntimeError as exc:
+        print(f"启动失败: {exc}", file=sys.stderr)
+        return 1
     logging.basicConfig(
-        level=getattr(logging, level, logging.WARNING),
+        level=getattr(logging, level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 

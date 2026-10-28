@@ -527,6 +527,36 @@ def test_timeout_signals_cooperative_executor():
         assert executor.done.wait(3)
 
 
+def test_health_is_public_and_token_protects_routes():
+    with _client(FakeExecutor(), api_token="s3cret") as client:
+        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/tasks").status_code == 401
+        assert client.get("/tasks", headers={"authorization": "Bearer nope"}).status_code == 401
+        assert client.get("/tasks", headers={"authorization": "Bearer s3cret"}).status_code == 200
+
+        response = client.post(
+            "/tasks",
+            json={"task": "带令牌提交", "thread_id": "auth-1"},
+            headers={"authorization": "Bearer s3cret"},
+        )
+        assert response.status_code == 202
+
+
+def test_rate_limit_returns_429_with_retry_after():
+    with _client(FakeExecutor(), rate_limit=2) as client:
+        assert client.get("/tasks").status_code == 200
+        assert client.get("/tasks").status_code == 200
+        response = client.get("/tasks")
+        assert response.status_code == 429
+        assert int(response.headers["Retry-After"]) >= 1
+        assert client.get("/health").status_code == 200  # 健康检查不受限
+
+
+def test_invalid_rate_limit_rejected():
+    with pytest.raises(ValueError):
+        create_app(settings=_settings(), executor=FakeExecutor(), rate_limit=-1)
+
+
 def test_task_table_survives_restart(tmp_path):
     executor = FakeExecutor(start_result=lambda task, thread_id: _awaiting())
     db = str(tmp_path / "tasks.sqlite")

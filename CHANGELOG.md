@@ -23,6 +23,8 @@
 - 任务表持久化：`--task-db` / `MULTI_AGENT_API_TASK_DB`（默认 `.multi_agent/tasks.sqlite`，`memory` 关闭）。
   重启后已结束任务照旧可查，中断的 `queued` / `running` 标 `failed`，`awaiting_approval` 保留并可
   直接批准（执行器用同一 registry 重建图从检查点继续）
+- API 鉴权与限流：`--api-token` / `MULTI_AGENT_API_TOKEN`（Bearer，`/health`、`/docs`、`/openapi.json` 免鉴权）、
+  `--rate-limit` / `MULTI_AGENT_API_RATE_LIMIT`（每 IP 每分钟，`429` + `Retry-After`），新增 `GET /health`
 
 ### Changed
 - 核心图未改动：API 复用 `run_task_full` / `resume_task` / `Settings`

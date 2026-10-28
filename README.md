@@ -208,6 +208,7 @@ multi-agent-api --log-level DEBUG                # 默认跟随 MULTI_AGENT_LOG_
 | `GET /approvals` | 当前挂起的人工审批 |
 | `GET /approvals/{thread_id}` | 单个待审批载荷 |
 | `POST /approvals/{thread_id}` | 批准或拒绝（`{"approved": true, "note": "同意"}`），立即返回 `202` |
+| `GET /health` | 健康检查（免鉴权、免限流） |
 
 状态机：`queued` → `running` → `completed` / `failed`，遇到高风险动作停在 `awaiting_approval`，
 批准或拒绝后回到 `running`；`DELETE`、执行超时（`--task-timeout`）或待审批过期会把任务收敛到
@@ -232,7 +233,10 @@ multi-agent-api --log-level DEBUG                # 默认跟随 MULTI_AGENT_LOG_
 - **执行超时**：`--task-timeout` 作用于 `queued` / `running`，批准审批后重新计时，超时 `error="task timed out after Ns"`；
 - **单进程**：任务并发由 `--max-workers` 控制，不要给 uvicorn 开多 worker（每个进程一份任务表）；
 - **审批串到同一条审计链路**：每次决策（含 `--resume` / `POST /approvals`）追加 JSONL（`MULTI_AGENT_AUDIT_LOG`）；
-- **没有内置认证**：默认只监听回环地址，对外暴露请让反向代理做认证。
+- **令牌鉴权（可选）**：设置 `--api-token` / `MULTI_AGENT_API_TOKEN` 后，除 `/health`、`/docs`、
+  `/openapi.json` 外都要求 `Authorization: Bearer <token>`，否则 `401`；留空则不鉴权（默认只监听回环地址）；
+- **限流（可选）**：`--rate-limit` / `MULTI_AGENT_API_RATE_LIMIT` 限制每客户端 IP 每分钟请求数，
+  超限 `429` + `Retry-After`，`/health` 不受限；计数在进程内存，多副本需在代理层做。
 
 ```bash
 curl -s -X POST localhost:8000/tasks -H 'content-type: application/json' \
@@ -300,6 +304,8 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 | `MULTI_AGENT_API_RETENTION` | 任务记录保留秒数，默认 `86400`；`0` 关闭回收 |
 | `MULTI_AGENT_API_MAX_RECORDS` | 任务表容量上限，默认 `1000`（只淘汰已结束记录；活跃记录占满后新提交 `503`） |
 | `MULTI_AGENT_API_TASK_DB` | 任务表 SQLite 路径，默认 `.multi_agent/tasks.sqlite`；`memory` 只存进程内 |
+| `MULTI_AGENT_API_TOKEN` | 访问令牌；留空不鉴权，设置后需 `Authorization: Bearer <token>` |
+| `MULTI_AGENT_API_RATE_LIMIT` | 每客户端 IP 每分钟请求上限，默认 `0`（关闭） |
 
 ## 设计约定
 
@@ -330,7 +336,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 79 个离线测试，不消耗 API
+pytest -q      # 82 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -369,7 +375,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（79 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（82 个，全部不联网）
 pytest -q
 
 # 3. 配密钥
@@ -391,7 +397,8 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 
 - **任务表的跨进程一致性**：任务表已落 SQLite（`--task-db`），但仍是**单进程**语义——
   多开 uvicorn worker 会各写各的记录、互相覆盖；要做多副本得换成带租约的任务队列。
-- **认证与限流**：API 没有鉴权、没有 CORS、没有限流，默认只监听回环地址，对外必须靠反向代理。
+- **反向代理层能力**：内置了 Bearer 令牌与单进程 IP 限流，但没有 CORS、没有按租户配额、
+  限流计数不进 Redis（多副本各自计数）；生产部署仍建议把这些交给网关。
 - **细粒度中断**：取消在**节点边界**生效（`run_task_full(should_cancel=...)`），正在跑的那次模型调用
   仍会把它自己的请求做完。要在一次调用内打断，只能把 timeout 调小或在模型客户端层做；流式场景
   需要 `astream_events` + 取消信号，属于另一套执行器。

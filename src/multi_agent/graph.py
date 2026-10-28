@@ -16,7 +16,7 @@ import logging
 import sqlite3
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -247,6 +247,72 @@ def _supervisor_prompt(registry: AgentRegistry, agent_names: list[str]) -> Syste
     return SystemMessage(content="\n".join(rules))
 
 
+def _role_of(registry: AgentRegistry, name: str | None) -> str | None:
+    if not name:
+        return None
+    try:
+        return registry.get(name).role
+    except KeyError:
+        return None
+
+
+def _last_expert_message(messages: list[Any]) -> Any | None:
+    for message in reversed(messages):
+        if isinstance(message, AIMessage) and getattr(message, "name", None) not in {
+            SUPERVISOR,
+            "approval",
+        }:
+            return message
+    return None
+
+
+def _count_rejections(messages: list[Any], registry: AgentRegistry) -> int:
+    return sum(
+        1
+        for message in messages
+        if isinstance(message, AIMessage)
+        and _role_of(registry, getattr(message, "name", None)) == "reviewer"
+        and _is_rejection(message)
+    )
+
+
+def _first_role(registry: AgentRegistry, agent_names: list[str], role: str) -> str | None:
+    for name in agent_names:
+        if _role_of(registry, name) == role:
+            return name
+    return None
+
+
+def _routing_guard(
+    nxt: str,
+    state: Mapping[str, Any],
+    registry: AgentRegistry,
+    agent_names: list[str],
+    max_rejections: int,
+) -> tuple[str, str]:
+    """确定性护栏：不连任、驳回上限。返回（新目标, 说明）。"""
+    if nxt == FINISH:
+        return nxt, ""
+    messages = list(state.get("messages") or [])
+
+    if _role_of(registry, nxt) == "reviewer":
+        rejections = _count_rejections(messages, registry)
+        if rejections >= max_rejections:
+            return FINISH, f"审查已驳回 {rejections} 次，停止返工"
+
+    last = _last_expert_message(messages)
+    last_name = getattr(last, "name", None) if last is not None else None
+    if last is None or nxt != last_name:
+        return nxt, ""
+    if "执行失败" in message_text(last):
+        return nxt, ""  # 失败后允许同一专家重试一次
+    if _role_of(registry, last_name) == "researcher":
+        writer = _first_role(registry, agent_names, "writer")
+        if writer is not None:
+            return writer, "避免连任，改由 writer 成稿"
+    return FINISH, "避免连任同一专家"
+
+
 def _decide(
     llm: Any,
     schema: type[BaseModel],
@@ -434,6 +500,14 @@ def build_graph(
             log.warning("supervisor 返回非法目标 %r，按 FINISH 处理", nxt)
             reason = f"（模型给出非法目标 {nxt!r}）{reason}"
             nxt = FINISH
+
+        guarded, note = _routing_guard(
+            nxt, state, registry, agent_names, settings.max_rejections
+        )
+        if guarded != nxt:
+            log.info("routing guard: %s -> %s（%s）", nxt, guarded, note)
+            reason = f"{reason}（{note}）" if reason else note
+            nxt = guarded
 
         log.info("turn %d -> %s | %s", turn + 1, nxt, reason)
         return Command(

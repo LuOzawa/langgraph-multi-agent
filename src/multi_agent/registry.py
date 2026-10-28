@@ -8,6 +8,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 
 ToolFactory = Callable[[], Sequence[BaseTool]]
+ROLES = frozenset({"researcher", "writer", "reviewer", "executor"})
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,8 @@ class AgentSpec:
     requires_approval=True 时，supervisor 选中该专家后先进入人工审批节点，
     批准后才真正执行（适用于上架、改价、发信等高风险动作）。
     tools_factory 每次调用都应返回新的工具列表，避免多个专家共享可变状态。
+    role 可选（researcher / writer / reviewer / executor），供路由护栏判断
+    「不连任」与「审查返工上限」；不填则只按名字做兜底。
     """
 
     name: str
@@ -31,6 +34,7 @@ class AgentSpec:
     max_steps: int | None = None
     requires_approval: bool = False
     approval_tools: tuple[str, ...] = ()
+    role: str | None = None
 
 
 class AgentRegistry:
@@ -40,6 +44,8 @@ class AgentRegistry:
     def register(self, spec: AgentSpec) -> None:
         if not spec.name or spec.name == "supervisor":
             raise ValueError("Agent 名称不能为空，且不能叫 supervisor")
+        if spec.role is not None and spec.role not in ROLES:
+            raise ValueError(f"role 只能是 {sorted(ROLES)} 或 None，当前值: {spec.role!r}")
         if spec.name in self._agents:
             raise ValueError(f"Agent 已存在: {spec.name}")
         self._agents[spec.name] = spec

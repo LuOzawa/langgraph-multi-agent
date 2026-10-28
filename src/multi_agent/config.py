@@ -65,6 +65,7 @@ class Settings:
     request_timeout: float
     max_retries: int
     log_level: str
+    max_rejections: int = 1
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -87,4 +88,5 @@ class Settings:
             request_timeout=_float_env("OPENAI_TIMEOUT", 120.0),
             max_retries=_int_env("OPENAI_MAX_RETRIES", 2),
             log_level=normalize_log_level(os.getenv("MULTI_AGENT_LOG_LEVEL")),
+            max_rejections=_int_env("MULTI_AGENT_MAX_REJECTIONS", 1, allow_zero=True),
         )

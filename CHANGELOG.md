@@ -39,6 +39,8 @@
   可交付正文才算 FINISH、reason ≤30 字」
 - `_final_answer` 跳过审查驳回文本，优先取最后一份草稿；触顶时标注「未产出可交付草稿」
 - `_decide_json` 兜底改为 `raw_decode` + 合法值清单，非法路由带清单重试一次
+- 路由硬护栏：`AgentSpec.role`（researcher/writer/reviewer/executor）+ `MULTI_AGENT_MAX_REJECTIONS`
+  （默认 1）；同一专家不连任（失败重试除外），reviewer 驳回达上限后直接收尾
 
 ### Fixed
 - 取消竞态：`DELETE` 落在「已批准、resume 未开始」之间时，已批准的高风险动作仍会执行。

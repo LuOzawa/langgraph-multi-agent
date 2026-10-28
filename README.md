@@ -267,6 +267,7 @@ registry.register(
         model="gpt-4o",                  # 可选：专家单独指定模型
         temperature=0.2,                 # 可选
         max_steps=8,                     # 可选：该专家内部工具循环步数上限
+        role="writer",                   # 可选：researcher/writer/reviewer/executor，供路由护栏使用
     )
 )
 
@@ -297,6 +298,7 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 | `MULTI_AGENT_NOTES_DIR` | 笔记目录，默认 `notes` |
 | `MULTI_AGENT_AUDIT_LOG` | 审批审计 JSONL 路径；`off` 关闭 |
 | `MULTI_AGENT_LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`，默认 WARNING |
+| `MULTI_AGENT_MAX_REJECTIONS` | 审查驳回上限，达到后直接收尾，默认 `1`；`0` 表示一次驳回即停 |
 | `MULTI_AGENT_API_HOST` | `multi-agent-api` 默认监听地址，默认 `127.0.0.1` |
 | `MULTI_AGENT_API_PORT` | `multi-agent-api` 默认端口，默认 `8000` |
 | `MULTI_AGENT_API_MAX_WORKERS` | `multi-agent-api` 并发任务数，默认 `4` |
@@ -316,6 +318,9 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 - **产出**：保留原始 `AIMessage`（含 content blocks），不会把结构化内容压成字符串；
 - **用量**：`RunResult.usage` 汇总 `input_tokens / output_tokens / total_tokens`（模型返回 usage 时才有值）；
 - **审批粒度**：支持专家级（`requires_approval`）与工具级（`approval_tools`）；工具级会在首次尝试时暂停并按需放行。
+- **路由护栏**：`AgentSpec.role`（researcher/writer/reviewer/executor）让 supervisor 的「不连任、审查驳回上限」
+  变成确定性规则——同一专家不会连续两次被选中（失败重试除外），reviewer 驳回达到
+  `MULTI_AGENT_MAX_REJECTIONS`（默认 1）后直接收尾，避免来回返工烧 token。
 
 ## 示例团队：跨境电商
 
@@ -336,7 +341,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 95 个离线测试，不消耗 API
+pytest -q      # 100 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -382,7 +387,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（95 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（100 个，全部不联网）
 pytest -q
 
 # 3. 配密钥

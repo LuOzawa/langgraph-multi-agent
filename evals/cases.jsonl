@@ -1,0 +1,12 @@
+# 评测用例：每行一个 JSON 对象
+# id 唯一；task 发给图；points 是「要点组」，组内词为同义，命中任一即算该要点满足
+{"id": "checkpoint", "task": "用三句话说明 LangGraph 检查点（checkpointer）在这个项目里解决什么问题。", "points": [["检查点", "checkpoint", "状态快照"], ["恢复", "续跑", "resume", "接着跑"], ["thread", "线程", "会话"]]}
+{"id": "approval", "task": "高风险动作的人工审批是怎么挂起和恢复的？说明关键机制。", "points": [["审批", "approval"], ["interrupt", "中断", "挂起"], ["恢复", "resume", "继续"]]}
+{"id": "budget", "task": "上下文预算裁剪的规则是什么？哪些消息会被保留？", "points": [["token", "预算"], ["保留", "首条", "第一条"], ["裁剪", "trim", "截断"]]}
+{"id": "isolation", "task": "某个专家执行失败时，框架怎么处理？为什么整个任务不会崩掉？", "points": [["异常", "失败", "错误"], ["supervisor", "路由", "中枢"], ["重试", "换人", "重试其他"]]}
+{"id": "maxturns", "task": "max_turns 触顶时会发生什么？返回的结果包含什么？", "points": [["轮次", "max_turns", "turn"], ["结束", "停止", "终止"], ["部分", "提示", "说明"]]}
+{"id": "audit", "task": "审批审计日志记录哪些字段？写在哪个文件？", "points": [["thread", "线程"], ["approved", "批准"], ["note", "备注"], ["jsonl", "json"]]}
+{"id": "toolapproval", "task": "工具级审批与专家级审批的区别是什么？未批准的工具会怎样？", "points": [["工具", "tool"], ["专家", "agent"], ["标记", "不执行", "不真正执行"]]}
+{"id": "parallel", "task": "run_parallel 能并行什么、不能并行什么？每个任务的状态是如何隔离的？", "points": [["独立", "独立任务", "多任务"], ["thread", "线程", "sqlite"], ["串行", "不会并行", "一次一个"]]}
+{"id": "relay", "task": "中转不支持 structured output 时，路由会怎么退化？", "points": [["json", "兜底", "降级"], ["structured", "结构化", "function calling"], ["失败", "400", "不支持"]]}
+{"id": "extend", "task": "新增一个专家需要改哪些地方？注册表怎么处理重名？", "points": [["agentspec", "注册", "registry"], ["system_prompt", "提示词"], ["重名", "valueerror", "重复"]]}

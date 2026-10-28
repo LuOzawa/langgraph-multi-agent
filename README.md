@@ -326,7 +326,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 70 个离线测试，不消耗 API
+pytest -q      # 76 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -340,6 +340,21 @@ HTTP API（提交与轮询、审批恢复、错误映射、参数校验、取消
 API 测试用 `fastapi.testclient` + 假执行器，不联网；`.[dev]` 已包含 fastapi / httpx，
 跑真实服务才需要 `.[api]`（多一个 uvicorn）。
 
+### 评测（真实模型，消耗 token）
+
+`evals/` 用默认团队跑一组带「要点检查」的任务，衡量答得好不好、花了多少：
+
+```bash
+python evals/run.py --limit 3                 # 读 .env / OPENAI_*
+python evals/run.py --model deepseek-v4-flash --base-url https://api.deepseek.com/v1
+python evals/run.py --strict                  # 有未通过用例时 exit 1
+```
+
+用例在 `evals/cases.jsonl`：`points` 是「要点组」，组内词为同义、命中任一即算满足；
+得分 = 命中组数 / 总组数，默认 `--min-score 0.6` 且 `stop_reason` 必须是 `finish`。
+报告写在 `evals/report.json`（`--out` 可改），含每条用例的得分、缺失要点、轮次、tokens、耗时。
+CI 不跑评测（需要真实 key 与预算），只跑离线测试；改 prompt 前后各跑一次即可对比。
+
 ## 本地开发
 
 ```bash
@@ -350,7 +365,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（70 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（76 个，全部不联网）
 pytest -q
 
 # 3. 配密钥
@@ -385,9 +400,8 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
   加 `fx_rate`（CNY/USD）与 `fob_cny` 参数，汇率缺失时报错而不是静默用 1.0。
 - **可观测性**：有结构化日志和 token 统计，但没有链路追踪。接 LangSmith 只需设
   `LANGCHAIN_TRACING_V2` + `LANGCHAIN_API_KEY`，不用改代码。
-- **评测集**：现在的测试全是假模型，验证的是「流程对不对」，不是「答得好不好」。
-  想建 `evals/`，放 10–20 条真实任务 + 期望要点，用真实模型跑，记录通过率与 token 成本，
-  改 prompt 前后各跑一次。
+- **更完整的评测**：`evals/` 目前是 10 条要点命中用例 + token/耗时统计；缺的是人工标注的更大用例集、
+  LLM-as-judge 打分（现为同义词子串匹配，会漏掉同义改写）以及按 prompt/模型的多轮对比报表。
 
 ## 文档
 

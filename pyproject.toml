@@ -53,7 +53,7 @@ where = ["src"]
 multi_agent = ["py.typed"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 [tool.ruff]

@@ -11,3 +11,4 @@ build/
 .DS_Store
 notes/
 .multi_agent/
+evals/report.json

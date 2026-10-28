@@ -15,6 +15,7 @@ class TaskStatus(str, Enum):
     AWAITING_APPROVAL = "awaiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELED = "canceled"
 
 
 class TaskSubmit(BaseModel):

@@ -173,23 +173,28 @@ ERP、飞书、前端不想装 Python 时，用 `multi-agent-api` 把同一套�
 ```bash
 pip install -e ".[api]"
 OPENAI_API_KEY=sk-... multi-agent-api            # 默认 127.0.0.1:8000
-multi-agent-api --host 0.0.0.0 --port 8765 --max-workers 8
+multi-agent-api --host 0.0.0.0 --port 8765 --max-workers 8 --task-timeout 900
+multi-agent-api --log-level DEBUG                # 默认跟随 MULTI_AGENT_LOG_LEVEL
 ```
 
-`--host` / `--port` / `--max-workers` 也可用 `MULTI_AGENT_API_HOST` / `MULTI_AGENT_API_PORT` /
-`MULTI_AGENT_API_MAX_WORKERS` 给默认值。OpenAPI 文档在 `/docs`。
+`--host` / `--port` / `--max-workers` / `--task-timeout` / `--retention` / `--max-records` 也可用
+`MULTI_AGENT_API_HOST` / `MULTI_AGENT_API_PORT` / `MULTI_AGENT_API_MAX_WORKERS` /
+`MULTI_AGENT_API_TASK_TIMEOUT` / `MULTI_AGENT_API_RETENTION` / `MULTI_AGENT_API_MAX_RECORDS`
+给默认值。OpenAPI 文档在 `/docs`。
 
 | 方法与路径 | 说明 |
 | --- | --- |
 | `POST /tasks` | 提交任务（`{"task": "...", "thread_id": "可选"}`），立即返回 `202` + `queued` |
 | `GET /tasks` | 列出任务，可按 `?status=` 过滤，按创建时间升序 |
 | `GET /tasks/{thread_id}` | 单个任务状态 |
+| `DELETE /tasks/{thread_id}` | 取消任务（软取消），立即返回 `202` + `canceled` |
 | `GET /approvals` | 当前挂起的人工审批 |
 | `GET /approvals/{thread_id}` | 单个待审批载荷 |
 | `POST /approvals/{thread_id}` | 批准或拒绝（`{"approved": true, "note": "同意"}`），立即返回 `202` |
 
 状态机：`queued` → `running` → `completed` / `failed`，遇到高风险动作停在 `awaiting_approval`，
-批准或拒绝后回到 `running`。错误码：`404` 任务不存在、`409` 任务已存在或当前不可审批、
+批准或拒绝后回到 `running`；`DELETE`、执行超时（`--task-timeout`）或待审批过期会把任务收敛到
+`canceled`。错误码：`404` 任务不存在、`409` 任务已存在或当前不可审批或已结束、
 `503` 服务正在关闭、`422` 参数非法（空任务、非法 `thread_id`）。
 
 几点约定：
@@ -260,6 +265,9 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 | `MULTI_AGENT_API_HOST` | `multi-agent-api` 默认监听地址，默认 `127.0.0.1` |
 | `MULTI_AGENT_API_PORT` | `multi-agent-api` 默认端口，默认 `8000` |
 | `MULTI_AGENT_API_MAX_WORKERS` | `multi-agent-api` 并发任务数，默认 `4` |
+| `MULTI_AGENT_API_TASK_TIMEOUT` | 单任务执行超时秒数，默认 `1800`；`0` 不限 |
+| `MULTI_AGENT_API_RETENTION` | 任务记录保留秒数，默认 `86400`；`0` 关闭回收 |
+| `MULTI_AGENT_API_MAX_RECORDS` | 任务表容量上限，默认 `1000`（只淘汰已结束记录） |
 
 ## 设计约定
 
@@ -290,7 +298,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 37 个离线测试，不消耗 API
+pytest -q      # 48 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -313,7 +321,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（37 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（48 个，全部不联网）
 pytest -q
 
 # 3. 配密钥

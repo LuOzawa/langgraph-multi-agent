@@ -34,11 +34,21 @@ def create_app(
     registry: AgentRegistry | None = None,
     executor: Executor | None = None,
     max_workers: int = 4,
+    task_timeout: float = 1800.0,
+    retention: float = 86_400.0,
+    max_records: int = 1000,
 ) -> FastAPI:
     """构建应用；settings 为空时读环境变量（缺 key 会抛 RuntimeError）。"""
     settings = settings or Settings.from_env()
     executor = executor or LangGraphExecutor(settings, registry)
-    manager = TaskManager(executor, settings, max_workers=max_workers)
+    manager = TaskManager(
+        executor,
+        settings,
+        max_workers=max_workers,
+        task_timeout=task_timeout,
+        retention=retention,
+        max_records=max_records,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -80,6 +90,14 @@ def create_app(
     @app.get("/tasks/{thread_id}", response_model=TaskView)
     def get_task(thread_id: str) -> TaskView:
         return manager.get(thread_id)
+
+    @app.delete(
+        "/tasks/{thread_id}",
+        response_model=TaskView,
+        status_code=http_status.HTTP_202_ACCEPTED,
+    )
+    def cancel_task(thread_id: str) -> TaskView:
+        return manager.cancel(thread_id)
 
     @app.get("/approvals", response_model=list[ApprovalView])
     def list_approvals() -> list[ApprovalView]:

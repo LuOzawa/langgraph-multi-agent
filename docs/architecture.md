@@ -72,6 +72,8 @@ supervisor -> approve_publisher (interrupt)
 - 图外：`run_parallel(tasks)` 用线程池跑多个**独立任务**（多 SKU / 多站点），每个任务独立 thread 与 SQLite 连接
 - HTTP：`TaskManager` 用线程池（`--max-workers`）跑提交上来的任务，每个任务 `build_graph()` 一次，
   保存的 app 用于审批恢复；任务表在进程内，重启即丢
+- HTTP 任务表治理：`task-timeout` 超时、`retention` 保留期、`max-records` 容量上限，都在请求路径上
+  惰性收敛（超时与待审批超期转 `canceled`，已结束记录过期删除），只淘汰已结束记录
 
 ## 入口层（HTTP API）
 

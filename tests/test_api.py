@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import RunnableLambda
 
 import multi_agent.api.service as service
+import multi_agent.graph as graph_module
 from multi_agent.api.app import create_app
 from multi_agent.api.service import LangGraphExecutor, StartOutcome
 from multi_agent.config import Settings
 from multi_agent.graph import RunResult
+from multi_agent.registry import AgentRegistry, AgentSpec
 
 THREAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
@@ -79,8 +86,32 @@ class FakeExecutor:
         return self._resume_result(thread_id, decision, app)
 
 
-def _client(executor: FakeExecutor, settings: Settings | None = None) -> TestClient:
-    app = create_app(settings=settings or _settings(), executor=executor, max_workers=2)
+class BlockingExecutor:
+    """start 阻塞到测试放行，用来模拟长任务、取消与超时。"""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+        self.fail = fail
+        self.app = object()
+
+    def start(self, task: str, thread_id: str) -> StartOutcome:
+        self.started.set()
+        self.release.wait(5)
+        self.finished.set()
+        if self.fail:
+            raise RuntimeError("迟到失败")
+        return StartOutcome(result=_completed(), app=self.app)
+
+    def resume(self, thread_id: str, decision: dict[str, Any], app: Any) -> RunResult:
+        return _completed()
+
+
+def _client(executor: Any, settings: Settings | None = None, **kwargs) -> TestClient:
+    app = create_app(
+        settings=settings or _settings(), executor=executor, max_workers=2, **kwargs
+    )
     return TestClient(app)
 
 
@@ -363,6 +394,190 @@ def test_shutdown_returns_503():
         assert response.status_code == 503, response.text
         assert response.json()["detail"] == "task manager is shutting down"
         assert executor.starts == []
+
+
+def test_cancel_running_task():
+    executor = BlockingExecutor()
+    with _client(executor) as client:
+        client.post("/tasks", json={"task": "长任务", "thread_id": "t-cancel"})
+        assert executor.started.wait(3)
+        response = client.delete("/tasks/t-cancel")
+        assert response.status_code == 202, response.text
+        assert response.json()["status"] == "canceled"
+        assert response.json()["error"] == "task canceled by client"
+        executor.release.set()
+        assert executor.finished.wait(3)
+        time.sleep(0.05)  # 等后台 _apply 抢锁
+        final = client.get("/tasks/t-cancel").json()
+        assert final["status"] == "canceled"
+        assert final["answer"] == ""  # 迟到结果被丢弃
+
+
+def test_canceled_task_not_revived_by_late_error():
+    executor = BlockingExecutor(fail=True)
+    with _client(executor) as client:
+        client.post("/tasks", json={"task": "取消后报错", "thread_id": "t-cancel-err"})
+        assert executor.started.wait(3)
+        assert client.delete("/tasks/t-cancel-err").status_code == 202
+        executor.release.set()
+        assert executor.finished.wait(3)
+        time.sleep(0.05)  # 等后台异常处理抢锁
+        final = client.get("/tasks/t-cancel-err").json()
+        assert final["status"] == "canceled"
+        assert final["error"] == "task canceled by client"
+        assert client.delete("/tasks/t-cancel-err").status_code == 202
+
+
+def test_cancel_finished_task_409():
+    with _client(FakeExecutor()) as client:
+        client.post("/tasks", json={"task": "已完成", "thread_id": "t-done2"})
+        _wait(client, "t-done2", "completed")
+        response = client.delete("/tasks/t-done2")
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == "task already finished"
+
+
+def test_cancel_unknown_404():
+    with _client(FakeExecutor()) as client:
+        response = client.delete("/tasks/ghost")
+        assert response.status_code == 404
+        assert response.json()["detail"] == "task not found"
+
+
+def test_cancel_is_idempotent():
+    executor = BlockingExecutor()
+    with _client(executor) as client:
+        client.post("/tasks", json={"task": "取消两次", "thread_id": "t-cancel2"})
+        assert executor.started.wait(3)
+        assert client.delete("/tasks/t-cancel2").status_code == 202
+        again = client.delete("/tasks/t-cancel2")
+        assert again.status_code == 202
+        assert again.json()["status"] == "canceled"
+        executor.release.set()
+        assert executor.finished.wait(3)
+
+
+def test_task_timeout_marks_canceled():
+    executor = BlockingExecutor()
+    with _client(executor, task_timeout=0.05) as client:
+        client.post("/tasks", json={"task": "会超时", "thread_id": "t-timeout"})
+        assert executor.started.wait(3)
+        final = _wait(client, "t-timeout", "canceled")
+        assert final["error"] == "task timed out after 0.05s"
+        executor.release.set()
+        assert executor.finished.wait(3)
+
+
+def test_retention_evicts_finished_tasks():
+    with _client(FakeExecutor(), retention=0.3) as client:
+        client.post("/tasks", json={"task": "短命", "thread_id": "t-evict"})
+        _wait(client, "t-evict", "completed")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if client.get("/tasks/t-evict").status_code == 404:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("任务未按 retention 回收")
+        assert client.get("/tasks").json() == []
+
+
+def test_approval_expires_and_releases_app():
+    executor = FakeExecutor(start_result=lambda task, thread_id: _awaiting())
+    with _client(executor, retention=0.3) as client:
+        client.post("/tasks", json={"task": "待审批过期", "thread_id": "t-expire"})
+        _wait(client, "t-expire", "awaiting_approval")
+        final = _wait(client, "t-expire", "canceled")
+        assert final["error"] == "approval expired"
+        assert client.get("/approvals").json() == []
+        assert client.post("/approvals/t-expire", json={"approved": True}).status_code == 409
+
+
+def test_max_records_evicts_oldest_finished():
+    with _client(FakeExecutor(), max_records=2) as client:
+        for thread_id in ["t-cap1", "t-cap2", "t-cap3"]:
+            client.post("/tasks", json={"task": thread_id, "thread_id": thread_id})
+            _wait(client, thread_id, "completed")
+        assert [item["thread_id"] for item in client.get("/tasks").json()] == [
+            "t-cap2",
+            "t-cap3",
+        ]
+
+
+def _patch_graph(monkeypatch, decisions):
+    """让真实图跑在假模型上：supervisor 走结构化路由，专家直接产出。"""
+    called: list[str] = []
+
+    class FakeChatModel(BaseChatModel):
+        role: str = "supervisor"
+
+        @property
+        def _llm_type(self) -> str:
+            return "fake-api"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="产出"))])
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def with_structured_output(self, schema, **kwargs):
+            def route(_input):
+                next_agent = decisions.pop(0) if decisions else "FINISH"
+                return schema(next_agent=next_agent, reason="测试路由")
+
+            return RunnableLambda(route)
+
+    def fake_make_llm(settings, *, model=None, temperature=0):
+        return FakeChatModel()
+
+    def fake_create_agent(llm, tools, system_prompt=None, **kwargs):
+        class Worker:
+            def invoke(self, inputs, config=None):
+                called.append(system_prompt)
+                return {"messages": [AIMessage(content=f"{system_prompt}-产出")]}
+
+        return Worker()
+
+    monkeypatch.setattr(graph_module, "make_llm", fake_make_llm)
+    monkeypatch.setattr(graph_module, "_create_agent", fake_create_agent)
+    return called
+
+
+def test_real_graph_approval_round_trip(monkeypatch, tmp_path):
+    called = _patch_graph(monkeypatch, ["publisher", "FINISH"])
+    registry = AgentRegistry()
+    registry.register(AgentSpec(name="writer", description="写文案", system_prompt="WRITE"))
+    registry.register(
+        AgentSpec(
+            name="publisher",
+            description="上架商品（高风险）",
+            system_prompt="PUBLISH",
+            requires_approval=True,
+        )
+    )
+    audit = tmp_path / "audit.jsonl"
+    settings = _settings(audit_log=str(audit), checkpoint_db=str(tmp_path / "ckpt.sqlite"))
+
+    app = create_app(settings=settings, registry=registry, max_workers=2)
+    with TestClient(app) as client:
+        assert (
+            client.post("/tasks", json={"task": "把 SKU-1 上架", "thread_id": "it-real"}).status_code
+            == 202
+        )
+        pending = _wait(client, "it-real", "awaiting_approval", timeout=5.0)
+        assert pending["pending"]["agent"] == "publisher"
+        approved = client.post("/approvals/it-real", json={"approved": True, "note": "同意"})
+        assert approved.status_code == 202, approved.text
+        final = _wait(client, "it-real", "completed", timeout=5.0)
+        assert final["answer"] == "PUBLISH-产出"
+        assert client.get("/approvals").json() == []
+
+    assert called == ["PUBLISH"]
+    rows = [json.loads(line) for line in audit.read_text("utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["agent"] == "publisher"
+    assert rows[0]["approved"] is True
 
 
 if __name__ == "__main__":  # pragma: no cover

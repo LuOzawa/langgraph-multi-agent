@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +22,10 @@ from multi_agent.graph import RunResult, build_graph, resume_task, run_task_full
 from multi_agent.registry import AgentRegistry
 
 logger = logging.getLogger("multi_agent.api")
+
+TERMINAL_STATUSES = frozenset(
+    {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELED}
+)
 
 
 class TaskNotFound(Exception):
@@ -105,6 +110,7 @@ class _TaskRecord:
     usage: dict[str, int] = field(default_factory=dict)
     error: str | None = None
     app: Any | None = field(default=None, repr=False)
+    deadline: float | None = None
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)
 
@@ -118,9 +124,18 @@ class TaskManager:
         settings: Settings,
         *,
         max_workers: int = 4,
+        task_timeout: float = 1800.0,
+        retention: float = 86_400.0,
+        max_records: int = 1000,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be >= 1")
+        if task_timeout < 0:
+            raise ValueError("task_timeout must be >= 0")
+        if retention < 0:
+            raise ValueError("retention must be >= 0")
+        if max_records < 1:
+            raise ValueError("max_records must be >= 1")
         self._executor = executor
         self._settings = settings
         self._lock = threading.Lock()
@@ -129,11 +144,15 @@ class TaskManager:
             max_workers=max_workers, thread_name_prefix="multi-agent-api"
         )
         self._closed = False
+        self._task_timeout = float(task_timeout)
+        self._retention = float(retention)
+        self._max_records = int(max_records)
 
     # ---- 查询 -------------------------------------------------------------
 
     def get(self, thread_id: str) -> TaskView:
         with self._lock:
+            self._sweep_locked()
             record = self._records.get(thread_id)
             if record is None:
                 raise TaskNotFound("task not found")
@@ -141,6 +160,7 @@ class TaskManager:
 
     def list_tasks(self, status: TaskStatus | None = None) -> list[TaskView]:
         with self._lock:
+            self._sweep_locked()
             records = sorted(self._records.values(), key=lambda item: item.created_at)
             return [
                 self._view(record)
@@ -150,6 +170,7 @@ class TaskManager:
 
     def list_approvals(self) -> list[ApprovalView]:
         with self._lock:
+            self._sweep_locked()
             records = sorted(
                 (
                     record
@@ -162,6 +183,7 @@ class TaskManager:
 
     def get_approval(self, thread_id: str) -> ApprovalView:
         with self._lock:
+            self._sweep_locked()
             record = self._records.get(thread_id)
             if record is None:
                 raise TaskNotFound("task not found")
@@ -175,11 +197,13 @@ class TaskManager:
         with self._lock:
             if self._closed:
                 raise TaskUnavailable("task manager is shutting down")
+            self._sweep_locked()
             tid = thread_id or f"api-{uuid.uuid4().hex[:8]}"
             if tid in self._records:
                 raise TaskConflict("task already exists")
-            record = _TaskRecord(thread_id=tid, task=task)
+            record = _TaskRecord(thread_id=tid, task=task, deadline=self._deadline())
             self._records[tid] = record
+            self._sweep_locked()
             view = self._view(record)
         try:
             self._pool.submit(self._run, tid, task)
@@ -193,6 +217,7 @@ class TaskManager:
         with self._lock:
             if self._closed:
                 raise TaskUnavailable("task manager is shutting down")
+            self._sweep_locked()
             record = self._records.get(thread_id)
             if record is None:
                 raise TaskNotFound("task not found")
@@ -202,6 +227,7 @@ class TaskManager:
             app = record.app
             record.status = TaskStatus.RUNNING
             record.pending = None
+            record.deadline = self._deadline()
             record.updated_at = _now()
             view = self._view(record)
             if app is None:
@@ -226,6 +252,21 @@ class TaskManager:
             raise TaskUnavailable("task manager is shutting down") from exc
         return view
 
+    def cancel(self, thread_id: str) -> TaskView:
+        with self._lock:
+            if self._closed:
+                raise TaskUnavailable("task manager is shutting down")
+            self._sweep_locked()
+            record = self._records.get(thread_id)
+            if record is None:
+                raise TaskNotFound("task not found")
+            if record.status is TaskStatus.CANCELED:
+                return self._view(record)
+            if record.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+                raise TaskConflict("task already finished")
+            self._mark_canceled(record, "task canceled by client")
+            return self._view(record)
+
     def shutdown(self) -> None:
         with self._lock:
             if self._closed:
@@ -233,12 +274,51 @@ class TaskManager:
             self._closed = True
         self._pool.shutdown(wait=False, cancel_futures=True)
 
+    def _sweep_locked(self) -> None:
+        """按超时、审批过期、保留期与容量上限收敛任务表；调用方需持锁。"""
+        monotonic_now = time.monotonic()
+        wall_now = datetime.now(timezone.utc)
+
+        for record in list(self._records.values()):
+            if (
+                record.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}
+                and record.deadline is not None
+                and monotonic_now >= record.deadline
+            ):
+                logger.warning("task %s timed out", record.thread_id)
+                self._mark_canceled(record, f"task timed out after {self._task_timeout:g}s")
+            elif (
+                record.status is TaskStatus.AWAITING_APPROVAL
+                and self._retention > 0
+                and (wall_now - record.updated_at).total_seconds() >= self._retention
+            ):
+                logger.warning("approval expired for %s", record.thread_id)
+                self._mark_canceled(record, "approval expired")
+
+        if self._retention > 0:
+            for thread_id, record in list(self._records.items()):
+                if (
+                    record.status in TERMINAL_STATUSES
+                    and (wall_now - record.updated_at).total_seconds() >= self._retention
+                ):
+                    del self._records[thread_id]
+
+        while len(self._records) > self._max_records:
+            finished = [
+                (record.updated_at, thread_id)
+                for thread_id, record in self._records.items()
+                if record.status in TERMINAL_STATUSES
+            ]
+            if not finished:
+                break
+            del self._records[min(finished)[1]]
+
     # ---- 后台执行 ---------------------------------------------------------
 
     def _run(self, thread_id: str, task: str) -> None:
         with self._lock:
             record = self._records.get(thread_id)
-            if record is None:
+            if record is None or record.status is TaskStatus.CANCELED:
                 return
             record.status = TaskStatus.RUNNING
             record.updated_at = _now()
@@ -266,13 +346,14 @@ class TaskManager:
     def _apply(self, thread_id: str, result: RunResult, app: Any) -> None:
         with self._lock:
             record = self._records.get(thread_id)
-            if record is None:
+            if record is None or record.status is TaskStatus.CANCELED:
                 return
             record.answer = result.answer
             record.turns = result.turns
             record.stop_reason = result.stop_reason
             record.usage = dict(result.usage)
             record.error = None
+            record.deadline = None
             record.updated_at = _now()
             if result.pending:
                 record.status = TaskStatus.AWAITING_APPROVAL
@@ -290,11 +371,25 @@ class TaskManager:
     # ---- 内部工具（调用方需持锁） -----------------------------------------
 
     def _mark_failed(self, record: _TaskRecord, error: str) -> None:
+        if record.status is TaskStatus.CANCELED:
+            return  # 软取消后迟到的失败不应复活任务
         record.status = TaskStatus.FAILED
         record.error = error
         record.pending = None
         record.app = None
+        record.deadline = None
         record.updated_at = _now()
+
+    def _mark_canceled(self, record: _TaskRecord, error: str) -> None:
+        record.status = TaskStatus.CANCELED
+        record.error = error
+        record.pending = None
+        record.app = None
+        record.deadline = None
+        record.updated_at = _now()
+
+    def _deadline(self) -> float | None:
+        return time.monotonic() + self._task_timeout if self._task_timeout > 0 else None
 
     @staticmethod
     def _view(record: _TaskRecord) -> TaskView:

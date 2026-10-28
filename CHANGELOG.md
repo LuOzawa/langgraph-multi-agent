@@ -33,6 +33,12 @@
 - API 新增状态 `canceled`；`DELETE`、超时、审批过期都落在该状态，迟到结果不会复活任务
 - 日志级别统一校验：`MULTI_AGENT_LOG_LEVEL` 与 `--log-level` 非法时启动即报错（CLI 原先静默退回 WARNING），
   可选 `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`
+- 默认团队 prompt 重写：researcher 允许通识推断并限 250 字、同一缺口只查一次；
+  writer 一次成稿限 600 字、不写收尾套话；reviewer 判据收敛为「必答点缺失 / 事实冲突 / 答非所问」，
+  驳回必交 writer、已给意见后默认通过。supervisor prompt 增加「不连任、按需选人、返工上限、
+  可交付正文才算 FINISH、reason ≤30 字」
+- `_final_answer` 跳过审查驳回文本，优先取最后一份草稿；触顶时标注「未产出可交付草稿」
+- `_decide_json` 兜底改为 `raw_decode` + 合法值清单，非法路由带清单重试一次
 
 ### Fixed
 - 取消竞态：`DELETE` 落在「已批准、resume 未开始」之间时，已批准的高风险动作仍会执行。

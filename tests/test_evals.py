@@ -239,3 +239,29 @@ def test_main_requires_api_key(monkeypatch, tmp_path):
     cases.write_text('{"id": "a", "task": "t", "points": [["x"]]}\n', "utf-8")
 
     assert ev.main(["--cases", str(cases), "--out", str(tmp_path / "r.json")]) == 1
+
+
+def test_llm_judge_uses_coverage_array():
+    class FakeLLM:
+        def invoke(self, prompt):
+            class Out:
+                content = '{"covered": [true, false]}'
+
+            return Out()
+
+    judge = ev.llm_judge(_settings(), llm=FakeLLM())
+    score, missing = judge("任务", "回答", [["甲"], ["乙"]])
+    assert score == 0.5
+    assert missing == [["乙"]]
+
+
+def test_llm_judge_rejects_mismatched_coverage_length():
+    class FakeLLM:
+        def invoke(self, prompt):
+            class Out:
+                content = '{"covered": [true]}'
+
+            return Out()
+
+    judge = ev.llm_judge(_settings(), llm=FakeLLM())
+    assert judge("任务", "回答", [["甲"], ["乙"]]) is None

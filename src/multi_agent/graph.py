@@ -307,6 +307,13 @@ def build_graph(
         )
         tools = registry.build_tools(spec)
         if spec.approval_tools:
+            available = {item.name for item in tools}
+            missing = sorted(name for name in spec.approval_tools if name not in available)
+            if missing:
+                raise ValueError(
+                    f"{name} 的 approval_tools 未命中工具: {missing}"
+                    f"（可用: {sorted(available)}）"
+                )
             guarded = set(spec.approval_tools)
             tools = [_guarded_tool(item) if item.name in guarded else item for item in tools]
         if _create_agent is not None:
@@ -647,6 +654,8 @@ def run_task_full(
                 pending=payload,
                 usage=usage_from_state(state),
             )
+        if isinstance(decision, bool):
+            decision = {"approved": decision}
         record_approval(settings=settings, thread_id=tid, payload=payload, decision=decision)
         next_input = Command(resume=decision)
     state = app.get_state(config).values or {}
@@ -699,9 +708,16 @@ def resume_task(
     """从挂起的审批继续执行。
 
     decision 形如 {"approved": True, "note": "同意"}，也可直接传 bool。
+    没有挂起审批时抛 ValueError（不会起幽灵 run）；决策照旧写审计。
     """
     if isinstance(decision, bool):
         decision = {"approved": decision}
+    settings = settings or Settings.from_env()
+    app = app or build_graph(settings=settings, registry=registry)
+    payload = pending_approval(app, thread_id)
+    if payload is None:
+        raise ValueError(f"thread {thread_id} 上没有挂起的审批")
+    record_approval(settings=settings, thread_id=thread_id, payload=payload, decision=decision)
     return run_task_full(
         "",
         settings=settings,

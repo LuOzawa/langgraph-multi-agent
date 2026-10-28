@@ -84,11 +84,13 @@ supervisor -> approve_publisher (interrupt)
                                                           │
                                      RunResult.pending ───┤ status=awaiting_approval（保存 app）
                                                           │
-    POST /approvals/{id} ──> record_approval（审计）──> 线程池 ──> LangGraphExecutor.resume
-                                                                  └──> resume_task(app=同一个 app)
+    POST /approvals/{id} ──> 线程池（记录已 RUNNING，取消可拦住）──> LangGraphExecutor.resume
+                                                                  └──> resume_task(app=同一个 app，先写审计)
 
 关键点：API 不传 `approver` 回调，所以 `run_task_full` 遇到 `interrupt` 会**返回**而不是阻塞；
-审批决策由 HTTP 请求异步触发，审计也在这里显式补写（`resume_task` 不会写审计）。
+审批决策由 HTTP 请求异步触发。审计统一由 `resume_task`（以及 `approver` 回调路径）写入：
+`multi-agent --resume`、`/resume`、`POST /approvals/{id}` 走的是同一条记录逻辑；
+没有挂起审批时 `resume_task` 直接抛 `ValueError`，不会起幽灵 run。
 
 ## 工具级审批
 

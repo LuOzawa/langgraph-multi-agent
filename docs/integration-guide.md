@@ -89,8 +89,9 @@ results = run_parallel(["上架 SKU-1", "上架 SKU-2", "上架 SKU-3"], registr
 [README 的 HTTP API 服务](../README.md#http-api-服务)。注意三点：
 
 - 自定义 `registry` 要在自己的脚本里 `create_app(registry=registry)` 传入，`multi-agent-api`
-  命令行只加载默认团队；
-- 任务表在进程内，重启后旧 thread 用 `multi-agent --resume <thread_id>` 接着跑；
+  命令行只加载默认团队；重启后恢复自定义团队的审批也要在自己的脚本里用**同一个 registry**
+  重新 `build_graph(registry=registry)`，再调 `resume_task(thread_id, decision, app=app)`；
+  `multi-agent --resume` 只适用于默认团队；
 - 服务不带认证，暴露到公网前必须挂在做鉴权的反向代理后面。
 
 ## 上线检查清单

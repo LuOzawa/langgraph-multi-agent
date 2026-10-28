@@ -70,6 +70,25 @@ supervisor -> approve_publisher (interrupt)
 
 - 图内：supervisor **串行**调度，一次一个专家
 - 图外：`run_parallel(tasks)` 用线程池跑多个**独立任务**（多 SKU / 多站点），每个任务独立 thread 与 SQLite 连接
+- HTTP：`TaskManager` 用线程池（`--max-workers`）跑提交上来的任务，每个任务 `build_graph()` 一次，
+  保存的 app 用于审批恢复；任务表在进程内，重启即丢
+- HTTP 任务表治理：`task-timeout` 超时、`retention` 保留期、`max-records` 容量上限，都在请求路径上
+  惰性收敛（超时与待审批超期转 `canceled`，已结束记录过期删除），只淘汰已结束记录
+
+## 入口层（HTTP API）
+
+`multi_agent/api/` 只做包装，不碰图：
+
+    POST /tasks ──> TaskManager.submit ──> 线程池 ──> LangGraphExecutor.start
+                                                └──> run_task_full(app=..., thread_id=...)
+                                                          │
+                                     RunResult.pending ───┤ status=awaiting_approval（保存 app）
+                                                          │
+    POST /approvals/{id} ──> record_approval（审计）──> 线程池 ──> LangGraphExecutor.resume
+                                                                  └──> resume_task(app=同一个 app)
+
+关键点：API 不传 `approver` 回调，所以 `run_task_full` 遇到 `interrupt` 会**返回**而不是阻塞；
+审批决策由 HTTP 请求异步触发，审计也在这里显式补写（`resume_task` 不会写审计）。
 
 ## 工具级审批
 
@@ -87,3 +106,4 @@ supervisor -> approve_publisher (interrupt)
 - 没有图内 `Send` 扇出，专家之间不能并行
 - 回调只到节点级 `on_event`，没有 token 级流式
 - 工具级审批会多一次专家调用（先探测、后执行）
+- HTTP 任务表只在进程内，且只支持单进程 uvicorn；跨重启查询要另加任务数据库

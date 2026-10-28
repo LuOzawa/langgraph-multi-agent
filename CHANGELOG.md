@@ -2,6 +2,26 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循语义化版本。
 
+## [Unreleased]
+
+### Added
+- HTTP API 层（`multi-agent[api]`）：`multi-agent-api` 启动 FastAPI 服务，
+  提供 `POST /tasks`、`GET /tasks`、`GET /tasks/{thread_id}`、`GET /approvals`、
+  `GET /approvals/{thread_id}`、`POST /approvals/{thread_id}`
+- 进程内任务表与后台执行（`TaskManager`，`--max-workers` 控制并发），
+  任务在遇到高风险动作时停在 `awaiting_approval` 并返回审批载荷
+- API 审批决策复用 `record_approval`，与 CLI 写同一条 JSONL 审计链路
+- `MULTI_AGENT_API_HOST` / `MULTI_AGENT_API_PORT` / `MULTI_AGENT_API_MAX_WORKERS`
+- 取消任务：`DELETE /tasks/{thread_id}`（软取消，立即返回 `202` + `canceled`；已结束任务 `409`）
+- 任务表治理：`--task-timeout` / `--retention` / `--max-records`
+  （`MULTI_AGENT_API_TASK_TIMEOUT` / `MULTI_AGENT_API_RETENTION` / `MULTI_AGENT_API_MAX_RECORDS`），
+  执行超时与待审批过期收敛为 `canceled`，已结束记录按保留期与容量上限回收
+- `multi-agent-api --log-level`：启动器接管日志级别（默认跟随 `MULTI_AGENT_LOG_LEVEL`）
+
+### Changed
+- 核心图未改动：API 复用 `run_task_full` / `resume_task` / `Settings`
+- API 新增状态 `canceled`；`DELETE`、超时、审批过期都落在该状态，迟到结果不会复活任务
+
 ## [0.4.0] - 2026-10-27
 
 ### Added

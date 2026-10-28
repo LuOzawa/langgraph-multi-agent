@@ -85,6 +85,14 @@ from multi_agent.graph import run_parallel
 results = run_parallel(["上架 SKU-1", "上架 SKU-2", "上架 SKU-3"], registry=registry, max_workers=3)
 ```
 
+给对方系统调用（HTTP）：先 `pip install -e ".[api]"` 再 `multi-agent-api`，接口与状态机见
+[README 的 HTTP API 服务](../README.md#http-api-服务)。注意三点：
+
+- 自定义 `registry` 要在自己的脚本里 `create_app(registry=registry)` 传入，`multi-agent-api`
+  命令行只加载默认团队；
+- 任务表在进程内，重启后旧 thread 用 `multi-agent --resume <thread_id>` 接着跑；
+- 服务不带认证，暴露到公网前必须挂在做鉴权的反向代理后面。
+
 ## 上线检查清单
 
 - [ ] 每个专家的 `description` 写的是“何时选它”

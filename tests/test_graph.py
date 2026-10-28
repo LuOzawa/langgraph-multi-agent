@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -441,3 +442,40 @@ def test_tool_approval_rejected_stops(monkeypatch):
 
     assert len(calls) == 1
     assert any("已拒绝 calc_landed_cost" in G.message_text(m) for m in result.messages)
+
+
+def test_sqlite_saver_resumes_from_another_thread(monkeypatch, tmp_path):
+    """API 层把 app 留在任务表里，恢复发生在线程池的另一个线程上。"""
+    called: list[str] = []
+    _recording_agents(monkeypatch, called)
+    _reset(["publisher", "FINISH"])
+    settings = _settings(checkpoint_db=str(tmp_path / "ckpt.sqlite"))
+    registry = _approval_registry()
+    box: dict = {}
+
+    def start() -> None:
+        box["app"] = G.build_graph(settings=settings, registry=registry)
+        box["result"] = G.run_task_full(
+            "把 SKU-1 上架",
+            settings=settings,
+            registry=registry,
+            thread_id="x-thread",
+            app=box["app"],
+        )
+
+    worker = threading.Thread(target=start)
+    worker.start()
+    worker.join(30)
+    assert not worker.is_alive()
+    assert box["result"].stop_reason == "awaiting_approval"
+
+    resumed = G.resume_task(
+        "x-thread",
+        {"approved": True, "note": "同意"},
+        settings=settings,
+        registry=registry,
+        app=box["app"],
+    )
+    assert resumed.stop_reason == "finish"
+    assert resumed.answer == "PUBLISH-产出"
+    assert called == ["PUBLISH"]

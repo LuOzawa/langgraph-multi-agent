@@ -19,8 +19,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -31,7 +34,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from multi_agent.config import Settings
-from multi_agent.graph import RunResult, run_task_full
+from multi_agent.graph import RunResult, message_text, run_task_full
 from multi_agent.registry import AgentRegistry, make_llm
 
 DEFAULT_CASES = Path(__file__).with_name("cases.jsonl")
@@ -130,6 +133,13 @@ def llm_judge(
     return judge
 
 
+def transcript_text(result: RunResult) -> str:
+    """评测看整段对话，而不是最后一条消息（末条常是「已交付」之类收尾）。"""
+    parts = [message_text(message) for message in result.messages]
+    text = "\n\n".join(part for part in parts if part.strip())
+    return text or result.answer
+
+
 def evaluate_case(
     case: dict[str, Any],
     result: RunResult,
@@ -138,8 +148,9 @@ def evaluate_case(
     min_score: float,
     judged: tuple[float, list[list[str]]] | None = None,
 ) -> dict[str, Any]:
+    text = transcript_text(result)
     if judged is None:
-        score, missing = score_answer(result.answer, case["points"])
+        score, missing = score_answer(text, case["points"])
         scored_by = "keywords"
     else:
         score, missing = judged
@@ -164,6 +175,18 @@ def _default_runner(task: str, thread_id: str, settings: Settings, registry: Age
     return run_task_full(task, settings=settings, registry=registry, thread_id=thread_id)
 
 
+def seed_notes(notes_dir: Path) -> None:
+    """把项目文档放进评测工作区，模拟「有资料可查」的真实用法。"""
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    repo = Path(__file__).resolve().parent.parent
+    sources = [repo / "README.md", *sorted((repo / "docs").glob("*.md"))]
+    for path in sources:
+        if path.exists():
+            (notes_dir / f"{path.stem}.md").write_text(
+                path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+
+
 def run_cases(
     cases: list[dict[str, Any]],
     *,
@@ -175,14 +198,29 @@ def run_cases(
     runner: Runner | None = None,
     judge: Judge | None = None,
     judge_model: str | None = None,
+    seed_docs: bool = True,
+    only: str | None = None,
 ) -> dict[str, Any]:
     selected = cases[:limit] if limit else list(cases)
+    if only:
+        selected = [case for case in selected if case["id"] == only]
+        if not selected:
+            raise ValueError(f"没有匹配的用例 id: {only}")
     run = runner or _default_runner
+    run_id = uuid.uuid4().hex[:8]  # 避免复用同一 thread 的旧检查点
+    # 评测不写用户工作区：检查点与笔记都放到临时目录
+    workdir = Path(tempfile.mkdtemp(prefix=f"multi-agent-eval-{run_id}-"))
+    notes_dir = workdir / "notes"
+    if seed_docs:
+        seed_notes(notes_dir)
+    eval_settings = replace(settings, checkpoint_db=str(workdir / "checkpoints.sqlite"))
+    previous_notes = os.environ.get("MULTI_AGENT_NOTES_DIR")
+    os.environ["MULTI_AGENT_NOTES_DIR"] = str(notes_dir)
 
     def one(case: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
-        result = run(case["task"], f"eval-{case['id']}", settings, registry)
-        judged = judge(case["task"], result.answer, case["points"]) if judge else None
+        result = run(case["task"], f"eval-{run_id}-{case['id']}", eval_settings, registry)
+        judged = judge(case["task"], transcript_text(result), case["points"]) if judge else None
         return evaluate_case(
             case,
             result,
@@ -191,11 +229,18 @@ def run_cases(
             judged=judged,
         )
 
-    if workers > 1:
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="eval") as pool:
-            results = list(pool.map(one, selected))
-    else:
-        results = [one(case) for case in selected]
+    try:
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="eval") as pool:
+                results = list(pool.map(one, selected))
+        else:
+            results = [one(case) for case in selected]
+    finally:
+        if previous_notes is None:
+            os.environ.pop("MULTI_AGENT_NOTES_DIR", None)
+        else:
+            os.environ["MULTI_AGENT_NOTES_DIR"] = previous_notes
+        shutil.rmtree(workdir, ignore_errors=True)
 
     tokens = sum(item["tokens"] for item in results)
     passed = sum(1 for item in results if item["passed"])
@@ -241,6 +286,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条用例")
+    parser.add_argument("--only", default=None, help="只跑指定 id 的用例")
+    parser.add_argument(
+        "--no-seed",
+        action="store_true",
+        help="不在评测工作区里预置项目文档（默认会放 README 与 docs/）",
+    )
     parser.add_argument("--workers", type=int, default=1, help="并发用例数（默认 1）")
     parser.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
     parser.add_argument("--api-key", default=None)
@@ -283,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         min_score=args.min_score,
         judge=judge,
         judge_model=judge_model,
+        seed_docs=not args.no_seed,
+        only=args.only,
     )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
@@ -68,14 +69,27 @@ def default_registry() -> AgentRegistry:
     return registry
 
 
+def _thinking_off_body(base_url: str, model: str) -> dict[str, Any] | None:
+    """DeepSeek V4 默认开 thinking：带 tools 时必须回传 reasoning_content，
+    而 langchain-openai 不提取该字段，工具循环第二轮会 400。这里默认关掉 thinking。"""
+    deepseek = "deepseek" in (base_url or "").lower() or "deepseek" in (model or "").lower()
+    return {"thinking": {"type": "disabled"}} if deepseek else None
+
+
 def make_llm(settings, *, model: str | None = None, temperature: float = 0) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
+    resolved = model or settings.model
+    extra_body = _thinking_off_body(settings.base_url, resolved)
+    kwargs: dict[str, Any] = {}
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
     return ChatOpenAI(
-        model=model or settings.model,
+        model=resolved,
         api_key=settings.api_key,
         base_url=settings.base_url,
         temperature=temperature,
         timeout=settings.request_timeout,
         max_retries=settings.max_retries,
+        **kwargs,
     )

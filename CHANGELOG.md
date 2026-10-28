@@ -52,6 +52,12 @@
 - 打包：补 `license` / `classifiers` / `[project.urls]`（wheel 带 `License-Expression: MIT`），
   CI 增加 packaging job（build → 干净 venv 安装 `[api]` wheel → 校验入口与版本）
 - API 版本号改为读取安装元数据，避免 `pyproject.toml` 与 `/openapi.json` 双源
+- 并发建图时的检查点连接创建串行化（多个 worker 同时执行 `PRAGMA journal_mode=WAL`
+  曾报 `database is locked`）
+- DeepSeek V4 thinking mode：`make_llm` 对 DeepSeek 模型默认关闭 thinking，
+  修复带 tools 时第二轮 400（`reasoning_content must be passed back`）
+- `evals/` 每次运行使用独立临时检查点库与笔记目录（跑完删除），thread_id 带随机前缀，
+  不再污染 `.multi_agent/`、`notes/` 或复用旧 checkpoint
 
 ## [0.4.0] - 2026-10-27
 

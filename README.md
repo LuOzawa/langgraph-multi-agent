@@ -336,7 +336,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 86 个离线测试，不消耗 API
+pytest -q      # 89 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -364,6 +364,8 @@ python evals/run.py --strict                  # 有未通过用例时 exit 1
 
 默认按关键词同义词匹配打分；`--judge` / `--judge-model` 改为让模型判定覆盖度
 （输出 `{"score": 0-1, "missing": [编号]}`），解析失败自动退回关键词打分，不会让评测中断。
+每次运行使用独立的临时检查点库与笔记目录（跑完删除），不会污染 `.multi_agent/` 或 `notes/`；
+thread_id 也带随机前缀，避免复用历史 checkpoint。
 
 用例在 `evals/cases.jsonl`：`points` 是「要点组」，组内词为同义、命中任一即算满足；
 得分 = 命中组数 / 总组数，默认 `--min-score 0.6` 且 `stop_reason` 必须是 `finish`。
@@ -380,7 +382,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（86 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（89 个，全部不联网）
 pytest -q
 
 # 3. 配密钥
@@ -430,6 +432,9 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 
 已对 deepseek-v4-flash 做真实探针与端到端验证：普通对话与 tool calling 可用，
 `response_format: json_schema` 返回 400，路由自动走 JSON 兜底并正常完成。
+DeepSeek V4 默认开 thinking mode，带 tools 时必须回传 `reasoning_content`，而
+`langchain-openai` 不做该字段透传——项目对 DeepSeek 模型默认关闭 thinking
+（`extra_body={"thinking": {"type": "disabled"}}`），否则工具循环第二轮会 400。
 详见 [docs/relay-compatibility.md](docs/relay-compatibility.md)。
 
 ## 已知取舍

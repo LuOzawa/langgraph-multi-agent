@@ -24,6 +24,17 @@
 
 **结论**：deepseek 官方接口不支持 `response_format: json_schema`，但支持 tool calling 与普通 JSON 输出。项目的降级路径（先 structured output，失败后要求模型输出 JSON 再解析）在真实模型上验证有效，不是只能跑假模型。
 
+## thinking mode（v4 系列）
+
+DeepSeek V4 默认开启 thinking mode（`reasoning_content`）。官方文档要求：请求带 `tools` 时，
+历史轮次的 `reasoning_content` 必须回传，否则 400
+`The reasoning_content in the thinking mode must be passed back to the API`。
+`langchain-openai` 目前不提取/透传该字段，所以工具循环第二轮必失败。
+
+项目处理：`make_llm` 对 DeepSeek（base_url 或模型名包含 `deepseek`）默认加
+`extra_body={"thinking": {"type": "disabled"}}`，工具链恢复正常；代价是没有 CoT 推理。
+实测关闭 thinking 后 `evals/run.py` 的 tool-calling 用例可通过，不再出现该 400。
+
 ## 复现
 
 ```bash

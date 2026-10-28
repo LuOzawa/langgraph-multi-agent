@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -248,6 +249,7 @@ def _decide_json(
 
 
 _SAVER_CACHE: dict[str, Any] = {}
+_SAVER_LOCK = threading.Lock()
 
 
 def make_checkpointer(path: str | None):
@@ -265,14 +267,19 @@ def make_checkpointer(path: str | None):
     if str(db.parent) not in {"", "."}:
         db.parent.mkdir(parents=True, exist_ok=True)
     # 每个数据库路径一个连接：SqliteSaver 已用 check_same_thread=False + 内部锁保证线程安全，
-    # 按线程拆分只会让连接数随线程数增长且永不关闭。
+    # 按线程拆分只会让连接数随线程数增长且永不关闭。建连必须串行，否则并发 PRAGMA 会互相锁库。
     key = str(db.resolve())
-    if key not in _SAVER_CACHE:
-        connection = sqlite3.connect(key, check_same_thread=False, timeout=30)
-        connection.execute("PRAGMA journal_mode=WAL")
-        _SAVER_CACHE[key] = SqliteSaver(connection)
-        log.debug("检查点数据库: %s", key)
-    return _SAVER_CACHE[key]
+    with _SAVER_LOCK:
+        if key not in _SAVER_CACHE:
+            connection = sqlite3.connect(key, check_same_thread=False, timeout=30)
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as exc:
+                # 别的进程正在切换日志模式：WAL 是持久设置，本轮跳过即可
+                log.warning("设置 WAL 失败（%s）: %s", key, exc)
+            _SAVER_CACHE[key] = SqliteSaver(connection)
+            log.debug("检查点数据库: %s", key)
+        return _SAVER_CACHE[key]
 
 
 def build_graph(

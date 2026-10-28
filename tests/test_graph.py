@@ -583,6 +583,17 @@ def test_resume_task_honors_cancel(monkeypatch):
     assert called == []  # 取消发生在专家执行前
 
 
+def test_make_checkpointer_is_thread_safe(tmp_path):
+    path = str(tmp_path / "concurrent.sqlite")
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        savers = list(pool.map(lambda _: G.make_checkpointer(path), range(8)))
+
+    assert len({id(saver) for saver in savers}) == 1  # 同一个实例
+    assert len([key for key in G._SAVER_CACHE if key == str(Path(path).resolve())]) == 1
+
+
 def test_checkpointer_reused_per_database_path(tmp_path):
     path = str(tmp_path / "ckpt.sqlite")
     first = G.make_checkpointer(path)

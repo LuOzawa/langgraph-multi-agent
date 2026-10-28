@@ -2,6 +2,20 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循语义化版本。
 
+## [Unreleased]
+
+### Added
+- HTTP API 层（`multi-agent[api]`）：`multi-agent-api` 启动 FastAPI 服务，
+  提供 `POST /tasks`、`GET /tasks`、`GET /tasks/{thread_id}`、`GET /approvals`、
+  `GET /approvals/{thread_id}`、`POST /approvals/{thread_id}`
+- 进程内任务表与后台执行（`TaskManager`，`--max-workers` 控制并发），
+  任务在遇到高风险动作时停在 `awaiting_approval` 并返回审批载荷
+- API 审批决策复用 `record_approval`，与 CLI 写同一条 JSONL 审计链路
+- `MULTI_AGENT_API_HOST` / `MULTI_AGENT_API_PORT` / `MULTI_AGENT_API_MAX_WORKERS`
+
+### Changed
+- 核心图未改动：API 复用 `run_task_full` / `resume_task` / `Settings`
+
 ## [0.4.0] - 2026-10-27
 
 ### Added

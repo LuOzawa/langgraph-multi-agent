@@ -63,12 +63,18 @@ src/multi_agent/
   tools/workspace.py # 示例工具（本地笔记）
   tools/ecommerce.py # 示例工具（到岸成本与定价）
   cli.py             # 命令行入口（多轮、进度、审批）
+  api/
+    __main__.py      # multi-agent-api 启动器
+    app.py           # FastAPI 应用与路由
+    schemas.py       # 请求 / 响应模型
+    service.py       # 任务表、后台执行、审批恢复（不依赖 FastAPI）
 examples/
   ecommerce_team.py  # 跨境电商团队（含审批门）
 tests/
   test_registry.py   # 注册表行为
   test_graph.py      # 路由/失败隔离/持久化/审批/裁剪
   test_tools.py      # 定价工具
+  test_api.py        # HTTP API（提交 / 轮询 / 审批 / 错误映射）
 ```
 
 流程：`START → supervisor → 某个专家 → supervisor → … → END`
@@ -160,6 +166,48 @@ results = run_parallel(["上架 SKU-1", "上架 SKU-2"], max_workers=2)
 而不是整个任务崩掉。`MULTI_AGENT_MAX_TURNS`（默认 12）是调度轮次上限，触顶会返回部分结果并附提示，
 不会无限绕圈。
 
+## HTTP API 服务
+
+ERP、飞书、前端不想装 Python 时，用 `multi-agent-api` 把同一套图暴露成 HTTP：
+
+```bash
+pip install -e ".[api]"
+OPENAI_API_KEY=sk-... multi-agent-api            # 默认 127.0.0.1:8000
+multi-agent-api --host 0.0.0.0 --port 8765 --max-workers 8
+```
+
+`--host` / `--port` / `--max-workers` 也可用 `MULTI_AGENT_API_HOST` / `MULTI_AGENT_API_PORT` /
+`MULTI_AGENT_API_MAX_WORKERS` 给默认值。OpenAPI 文档在 `/docs`。
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `POST /tasks` | 提交任务（`{"task": "...", "thread_id": "可选"}`），立即返回 `202` + `queued` |
+| `GET /tasks` | 列出任务，可按 `?status=` 过滤，按创建时间升序 |
+| `GET /tasks/{thread_id}` | 单个任务状态 |
+| `GET /approvals` | 当前挂起的人工审批 |
+| `GET /approvals/{thread_id}` | 单个待审批载荷 |
+| `POST /approvals/{thread_id}` | 批准或拒绝（`{"approved": true, "note": "同意"}`），立即返回 `202` |
+
+状态机：`queued` → `running` → `completed` / `failed`，遇到高风险动作停在 `awaiting_approval`，
+批准或拒绝后回到 `running`。错误码：`404` 任务不存在、`409` 任务已存在或当前不可审批、
+`503` 服务正在关闭、`422` 参数非法（空任务、非法 `thread_id`）。
+
+几点约定：
+
+- **任务表在进程内**：重启后 `GET /tasks` 不认识旧任务，但检查点在，可用 `multi-agent --resume <thread_id>` 接着跑；
+- **单进程**：任务并发由 `--max-workers` 控制，不要给 uvicorn 开多 worker（每个进程一份任务表）；
+- **审批串到同一条审计链路**：每次决策照旧追加 JSONL（`MULTI_AGENT_AUDIT_LOG`）；
+- **没有内置认证**：默认只监听回环地址，对外暴露请让反向代理做认证。
+
+```bash
+curl -s -X POST localhost:8000/tasks -H 'content-type: application/json' \
+     -d '{"task": "上架收纳盒到亚马逊美国站"}'
+curl -s localhost:8000/tasks/api-1a2b3c4d
+curl -s localhost:8000/approvals
+curl -s -X POST localhost:8000/approvals/api-1a2b3c4d \
+     -H 'content-type: application/json' -d '{"approved": true, "note": "复核通过"}'
+```
+
 ## 扩展
 
 ### 新增专家
@@ -209,6 +257,9 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 | `MULTI_AGENT_NOTES_DIR` | 笔记目录，默认 `notes` |
 | `MULTI_AGENT_AUDIT_LOG` | 审批审计 JSONL 路径；`off` 关闭 |
 | `MULTI_AGENT_LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING`，默认 WARNING |
+| `MULTI_AGENT_API_HOST` | `multi-agent-api` 默认监听地址，默认 `127.0.0.1` |
+| `MULTI_AGENT_API_PORT` | `multi-agent-api` 默认端口，默认 `8000` |
+| `MULTI_AGENT_API_MAX_WORKERS` | `multi-agent-api` 并发任务数，默认 `4` |
 
 ## 设计约定
 
@@ -239,14 +290,18 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 22 个离线测试，不消耗 API
+pytest -q      # 37 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
 
 CI 在 Python 3.10 / 3.11 / 3.12 上跑同一套命令。测试覆盖：完整四跳路由、路由消息不外泄、
 专家失败隔离、max_turns 保护、非法路由降级、按 thread 保留历史、审批通过/拒绝/待审批、
-工具级审批拦截与放行、审计落盘、并行任务、上下文裁剪、定价工具边界。
+工具级审批拦截与放行、审计落盘、并行任务、上下文裁剪、定价工具边界，
+以及 HTTP API（提交与轮询、审批恢复、错误映射、参数校验）。
+
+API 测试用 `fastapi.testclient` + 假执行器，不联网；`.[dev]` 已包含 fastapi / httpx，
+跑真实服务才需要 `.[api]`（多一个 uvicorn）。
 
 ## 本地开发
 
@@ -258,7 +313,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（22 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（37 个，全部不联网）
 pytest -q
 
 # 3. 配密钥
@@ -271,12 +326,14 @@ python tools/compat_probe.py --provider deepseek
 python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美国站"
 ```
 
-读代码的顺序：`state.py`（状态契约）→ `graph.py`（路由/审批/裁剪）→ `registry.py`（怎么加专家）→ `cli.py`（入口）。
+读代码的顺序：`state.py`（状态契约）→ `graph.py`（路由/审批/裁剪）→ `registry.py`（怎么加专家）→
+`cli.py`（命令行入口）→ `api/`（HTTP 入口）。
 
 ## 还没做的
 
-- **HTTP API 服务层**：现在只有 CLI 和 Python 库两种入口，ERP / 飞书 / 前端没法通过网络调用。
-  打算用 FastAPI 包一层现有函数，不动核心：提交任务、查状态、列待审批、批或拒。
+- **跨重启的任务表**：API 的任务状态只在进程内，重启后旧任务查不到（检查点仍在，可 `--resume` 接着跑）。
+  要长期查询就得把任务表落到 SQLite，并把检查点表当内部实现、不对外暴露。
+- **认证与限流**：API 没有鉴权、没有 CORS、没有限流，默认只监听回环地址，对外必须靠反向代理。
 - **图内 `Send` 扇出**：supervisor 一次只能选一个专家，多个独立子任务只能排队或走 `run_parallel`。
   改成 `Send` 扇出要注意状态合并——`messages` 用 `add_messages` 没问题，`turn` / `stop_reason` 是覆盖语义，
   并行分支会互相覆盖，得改成 `Annotated[..., operator.add]` 或只让 supervisor 写。

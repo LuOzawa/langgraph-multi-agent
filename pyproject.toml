@@ -18,10 +18,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "ruff>=0.6.0", "mypy>=1.11.0"]
+api = ["fastapi>=0.115.0", "uvicorn>=0.30.0"]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+  "mypy>=1.11.0",
+  "fastapi>=0.115.0",
+  "httpx>=0.27.0",
+]
 
 [project.scripts]
 multi-agent = "multi_agent.cli:main"
+multi-agent-api = "multi_agent.api.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -16,6 +16,7 @@ DEFAULT_MAX_WORKERS = 4
 DEFAULT_TASK_TIMEOUT = 1800.0
 DEFAULT_RETENTION = 86_400.0
 DEFAULT_MAX_RECORDS = 1000
+DEFAULT_TASK_DB = ".multi_agent/tasks.sqlite"
 
 
 def _env_int(name: str, default: int, *, low: int, high: int | None = None) -> int:
@@ -101,6 +102,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--task-db",
+        default=os.getenv("MULTI_AGENT_API_TASK_DB", DEFAULT_TASK_DB),
+        help=(
+            f"任务表 SQLite 路径（默认 {DEFAULT_TASK_DB}，也可用 MULTI_AGENT_API_TASK_DB；"
+            "memory 表示只存进程内）"
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default=None,
         help="DEBUG/INFO/WARNING/ERROR/CRITICAL，默认跟随 MULTI_AGENT_LOG_LEVEL",
@@ -175,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
             task_timeout=task_timeout,
             retention=retention,
             max_records=records,
+            task_db=args.task_db,
         )
     except (RuntimeError, ValueError) as exc:
         print(f"启动失败: {exc}", file=sys.stderr)

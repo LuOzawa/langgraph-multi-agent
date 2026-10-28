@@ -17,6 +17,7 @@ import multi_agent.api.service as service
 import multi_agent.graph as graph_module
 from multi_agent.api.app import create_app
 from multi_agent.api.service import LangGraphExecutor, StartOutcome
+from multi_agent.api.store import TaskStore
 from multi_agent.config import Settings
 from multi_agent.graph import RunResult
 from multi_agent.registry import AgentRegistry, AgentSpec
@@ -524,6 +525,75 @@ def test_timeout_signals_cooperative_executor():
         assert final["error"] == "task timed out after 0.05s"
         assert executor.seen.wait(3), "超时未通知执行器停下"
         assert executor.done.wait(3)
+
+
+def test_task_table_survives_restart(tmp_path):
+    executor = FakeExecutor(start_result=lambda task, thread_id: _awaiting())
+    db = str(tmp_path / "tasks.sqlite")
+    settings = _settings()
+
+    with TestClient(create_app(settings=settings, executor=executor, task_db=db)) as client:
+        client.post("/tasks", json={"task": "上架新品", "thread_id": "p1"})
+        _wait(client, "p1", "awaiting_approval")
+
+    with TestClient(create_app(settings=settings, executor=executor, task_db=db)) as client:
+        recovered = client.get("/tasks/p1").json()
+        assert recovered["status"] == "awaiting_approval"
+        assert recovered["pending"]["agent"] == "publisher"
+        assert client.post("/approvals/p1", json={"approved": True}).status_code == 202
+        assert _wait(client, "p1", "completed")["answer"] == "完成"
+
+    # 重启后没有保存的图实例，resume 传 None 由执行器重建
+    assert executor.resumes[-1][2] is None
+
+
+def test_restart_marks_interrupted_tasks_failed(tmp_path):
+    db = str(tmp_path / "tasks.sqlite")
+    store = TaskStore(db)
+    store.upsert(
+        {
+            "thread_id": "lost",
+            "task": "跑到一半",
+            "status": "running",
+            "answer": "",
+            "turns": 1,
+            "stop_reason": "",
+            "pending": None,
+            "usage": None,
+            "error": None,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
+    store.close()
+
+    with _client(FakeExecutor(), task_db=db) as client:
+        view = client.get("/tasks/lost").json()
+        assert view["status"] == "failed"
+        assert "restarted" in view["error"]
+
+    store = TaskStore(db)
+    rows = {row["thread_id"]: row for row in store.load()}
+    store.close()
+    assert rows["lost"]["status"] == "failed"
+
+
+def test_retention_deletes_persisted_rows(tmp_path):
+    db = str(tmp_path / "tasks.sqlite")
+    with _client(FakeExecutor(), retention=0.2, task_db=db) as client:
+        client.post("/tasks", json={"task": "短命", "thread_id": "gone"})
+        _wait(client, "gone", "completed")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if client.get("/tasks/gone").status_code == 404:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("任务未按 retention 回收")
+
+    store = TaskStore(db)
+    assert store.load() == []
+    store.close()
 
 
 def test_cancel_running_task():

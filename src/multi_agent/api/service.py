@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from multi_agent.api.schemas import ApprovalView, TaskStatus, TaskView
+from multi_agent.api.store import TaskStore, decode_json, encode_json
 from multi_agent.config import Settings
 from multi_agent.graph import RunResult, build_graph, resume_task, run_task_full
 from multi_agent.registry import AgentRegistry
@@ -126,6 +127,15 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_PERSIST_OFF = {"", "memory", ":memory:", "none", "off"}
+
+
+def _persist_path(value: str | None) -> str | None:
+    """`memory` / 空值表示不落盘。"""
+    target = (value or "").strip()
+    return None if target.lower() in _PERSIST_OFF else target
+
+
 @dataclass
 class _TaskRecord:
     thread_id: str
@@ -145,7 +155,7 @@ class _TaskRecord:
 
 
 class TaskManager:
-    """进程内任务表。服务重启后任务状态丢失，但检查点仍在。"""
+    """任务表。默认只在进程内；传 `task_db` 时落 SQLite，重启后可继续查询与审批。"""
 
     def __init__(
         self,
@@ -155,6 +165,7 @@ class TaskManager:
         task_timeout: float = 1800.0,
         retention: float = 86_400.0,
         max_records: int = 1000,
+        task_db: str | None = None,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be >= 1")
@@ -174,6 +185,64 @@ class TaskManager:
         self._task_timeout = float(task_timeout)
         self._retention = float(retention)
         self._max_records = int(max_records)
+        persist_to = _persist_path(task_db)
+        self._store = TaskStore(persist_to) if persist_to is not None else None
+        self._load_records()
+
+    # ---- 持久化 -----------------------------------------------------------
+
+    def _load_records(self) -> None:
+        """启动时恢复任务表：中断中的任务标记失败，待审批的保留以便重建图继续。"""
+        if self._store is None:
+            return
+        for row in self._store.load():
+            record = self._record_from_row(row)
+            if record.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
+                record.status = TaskStatus.FAILED
+                record.stop_reason = "error"
+                record.error = "service restarted before completion"
+                record.pending = None
+                record.app = None
+                record.deadline = None
+                record.updated_at = _now()
+                self._save(record)
+            self._records[record.thread_id] = record
+
+    def _save(self, record: _TaskRecord) -> None:
+        if self._store is not None:
+            self._store.upsert(self._row(record))
+
+    @staticmethod
+    def _row(record: _TaskRecord) -> dict[str, Any]:
+        return {
+            "thread_id": record.thread_id,
+            "task": record.task,
+            "status": record.status.value,
+            "answer": record.answer,
+            "turns": record.turns,
+            "stop_reason": record.stop_reason,
+            "pending": encode_json(record.pending),
+            "usage": encode_json(record.usage),
+            "error": record.error,
+            "created_at": record.created_at.isoformat(),
+            "updated_at": record.updated_at.isoformat(),
+        }
+
+    @staticmethod
+    def _record_from_row(row: dict[str, Any]) -> _TaskRecord:
+        return _TaskRecord(
+            thread_id=row["thread_id"],
+            task=row["task"],
+            status=TaskStatus(row["status"]),
+            answer=row["answer"] or "",
+            turns=int(row["turns"] or 0),
+            stop_reason=row["stop_reason"] or "",
+            pending=decode_json(row["pending"]) or None,
+            usage=decode_json(row["usage"]) or {},
+            error=row["error"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
 
     # ---- 查询 -------------------------------------------------------------
 
@@ -238,6 +307,7 @@ class TaskManager:
             record = _TaskRecord(thread_id=tid, task=task, deadline=self._deadline())
             self._records[tid] = record
             self._sweep_locked()
+            self._save(record)
             view = self._view(record)
         try:
             self._pool.submit(self._run, tid, task)
@@ -262,12 +332,11 @@ class TaskManager:
             record.pending = None
             record.deadline = self._deadline()
             record.updated_at = _now()
+            self._save(record)
             view = self._view(record)
-            if app is None:
-                self._mark_failed(record, "task app is unavailable")
-                raise TaskConflict("task app is unavailable")
             try:
-                # 持锁提交：避免「已批准 → 提交前被取消」的窗口执行到已取消任务
+                # 持锁提交：避免「已批准 → 提交前被取消」的窗口执行到已取消任务。
+                # app 为空表示重启后从 SQLite 恢复的记录，由执行器用同一 registry 重建图。
                 self._pool.submit(self._resume, thread_id, app, dict(decision))
             except RuntimeError as exc:
                 self._mark_failed(record, "task manager is shutting down")
@@ -295,6 +364,8 @@ class TaskManager:
                 return
             self._closed = True
         self._pool.shutdown(wait=False, cancel_futures=True)
+        if self._store is not None:
+            self._store.close()
 
     def _sweep_locked(self) -> None:
         """按超时、审批过期、保留期与容量上限收敛任务表；调用方需持锁。"""
@@ -324,6 +395,8 @@ class TaskManager:
                     and (wall_now - record.updated_at).total_seconds() >= self._retention
                 ):
                     del self._records[thread_id]
+                    if self._store is not None:
+                        self._store.delete(thread_id)
 
         while len(self._records) > self._max_records:
             finished = [
@@ -333,7 +406,10 @@ class TaskManager:
             ]
             if not finished:
                 break
-            del self._records[min(finished)[1]]
+            evicted = min(finished)[1]
+            del self._records[evicted]
+            if self._store is not None:
+                self._store.delete(evicted)
 
     # ---- 后台执行 ---------------------------------------------------------
 
@@ -344,6 +420,7 @@ class TaskManager:
                 return
             record.status = TaskStatus.RUNNING
             record.updated_at = _now()
+            self._save(record)
             cancel_event = record.cancel_event
         try:
             outcome = self._executor.start(
@@ -391,6 +468,7 @@ class TaskManager:
                 record.status = TaskStatus.AWAITING_APPROVAL
                 record.pending = dict(result.pending)
                 record.app = app
+                self._save(record)
             elif result.stop_reason == "awaiting_approval":
                 self._mark_failed(record, "awaiting_approval without pending payload")
             elif result.stop_reason == "canceled":
@@ -401,6 +479,7 @@ class TaskManager:
                 record.status = TaskStatus.COMPLETED
                 record.pending = None
                 record.app = None
+                self._save(record)
 
     # ---- 内部工具（调用方需持锁） -----------------------------------------
 
@@ -413,6 +492,7 @@ class TaskManager:
         record.app = None
         record.deadline = None
         record.updated_at = _now()
+        self._save(record)
 
     def _mark_canceled(self, record: _TaskRecord, error: str) -> None:
         record.status = TaskStatus.CANCELED
@@ -422,6 +502,7 @@ class TaskManager:
         record.deadline = None
         record.cancel_event.set()  # 让正在跑的图在下一个节点边界停下
         record.updated_at = _now()
+        self._save(record)
 
     def _deadline(self) -> float | None:
         return time.monotonic() + self._task_timeout if self._task_timeout > 0 else None

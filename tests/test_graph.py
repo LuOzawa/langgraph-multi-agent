@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
@@ -625,3 +625,55 @@ def test_unknown_approval_tool_rejected():
     )
     with pytest.raises(ValueError, match="approval_tools 未命中工具"):
         G.build_graph(settings=_settings(), registry=registry, checkpointer=InMemorySaver())
+
+
+def test_final_answer_prefers_draft_over_review_rejection():
+    messages = [
+        HumanMessage(content="新增专家的改动点？"),
+        AIMessage(content="第一段结论：需要改 registry 与 defaults。\n\n1. 注册 AgentSpec\n2. 提供 system_prompt", name="writer"),
+        AIMessage(content="# 审查意见\n结论：需返工\n1. 第 2 点缺示例 → 补一行\n需返工", name="reviewer"),
+    ]
+    answer = G._final_answer({"messages": messages, "stop_reason": "finish"})
+    assert answer.startswith("第一段结论")
+    assert "审查意见" not in answer
+
+
+def test_final_answer_keeps_passing_review_with_draft():
+    passed = "# 最终定稿\n注册并填 system_prompt 即可。\n审查通过"
+    messages = [
+        HumanMessage(content="怎么加专家？"),
+        AIMessage(content="草稿", name="writer"),
+        AIMessage(content=passed, name="reviewer"),
+    ]
+    assert G._final_answer({"messages": messages, "stop_reason": "finish"}) == passed
+
+
+def test_final_answer_annotates_missing_draft_on_max_turns():
+    messages = [
+        HumanMessage(content="任务"),
+        AIMessage(content="# 审查意见\n需返工", name="reviewer"),
+    ]
+    answer = G._final_answer({"messages": messages, "stop_reason": "max_turns"})
+    assert "未产出可交付草稿" in answer
+    assert "达到最大调度次数上限" in answer
+
+
+def test_decide_json_retries_invalid_agent():
+    class Stub:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, messages):
+            self.calls.append(messages[-1].content)
+            if len(self.calls) == 1:
+                return AIMessage(content='{"next_agent": "nonexistent", "reason": "猜的"}')
+            return AIMessage(content='{"next_agent": "FINISH", "reason": "已有正文"}')
+
+    stub = Stub()
+    schema = G._route_schema(["writer"])
+    decision = G._decide_json(
+        stub, schema, SystemMessage(content="supervisor"), [], ["writer"]
+    )
+    assert decision.next_agent == "FINISH"
+    assert len(stub.calls) == 2
+    assert "只能是" in stub.calls[1]

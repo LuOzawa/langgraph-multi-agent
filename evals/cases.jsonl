@@ -5,7 +5,7 @@
 {"id": "budget", "task": "多轮对话里为什么要做上下文预算裁剪？一般保留哪些消息？", "points": [["token", "预算"], ["保留", "首条", "第一条"], ["裁剪", "trim", "截断"]]}
 {"id": "isolation", "task": "某个专家执行失败时，多 Agent 系统应该怎么处理才不会拖垮整个任务？", "points": [["异常", "失败", "错误"], ["supervisor", "路由", "中枢"], ["重试", "换人", "重试其他"]]}
 {"id": "maxturns", "task": "调度轮次上限（max_turns）触顶时应该怎么收尾？返回的结果应包含什么？", "points": [["轮次", "max_turns", "turn"], ["结束", "停止", "终止"], ["部分", "提示", "说明"]]}
-{"id": "audit", "task": "审批审计日志一般记录哪些字段？为什么适合用 JSONL 存储？", "points": [["thread", "线程"], ["approved", "批准"], ["note", "备注"], ["jsonl", "json"]]}
+{"id": "audit", "task": "审批审计日志一般记录哪些字段？为什么适合用 JSONL 存储？", "points": [["thread", "线程", "trace", "请求 id", "关联"], ["approved", "批准", "结果", "状态", "动作"], ["note", "备注", "意见", "理由"], ["jsonl", "json", "逐行", "追加"]]}
 {"id": "toolapproval", "task": "工具级审批与专家级审批有什么区别？未批准的工具应该怎样处理？", "points": [["工具", "tool"], ["专家", "agent"], ["标记", "不执行", "不真正执行"]]}
 {"id": "parallel", "task": "并行执行多个独立任务时，如何隔离状态（thread / 检查点）？哪些操作不能并行？", "points": [["独立", "独立任务", "多任务"], ["thread", "线程", "sqlite"], ["串行", "不会并行", "一次一个"]]}
 {"id": "relay", "task": "模型接口不支持 structured output（json_schema）时，路由层可以怎样降级？", "points": [["json", "兜底", "降级"], ["structured", "结构化", "function calling"], ["失败", "400", "不支持"]]}

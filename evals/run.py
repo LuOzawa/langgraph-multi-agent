@@ -44,7 +44,8 @@ DEFAULT_MIN_SCORE = 0.6
 Runner = Callable[[str, str, Settings, AgentRegistry | None], RunResult]
 Judge = Callable[[str, str, list[list[str]]], tuple[float, list[list[str]]] | None]
 
-JUDGE_PROMPT = """你在给一次问答打分。只判断语义是否覆盖要点，不要因为措辞不同而扣分。
+JUDGE_PROMPT = """你在给一次问答打分。逐个判断回答是否覆盖每个要点，不要因为措辞不同而扣分；
+同义改写、举例说明、换一种分类都算覆盖。
 
 任务：
 {task}
@@ -56,7 +57,8 @@ JUDGE_PROMPT = """你在给一次问答打分。只判断语义是否覆盖要�
 {points}
 
 只输出 JSON，不要解释：
-{{"score": 0 到 1 之间的小数, "missing": [未覆盖的要点编号]}}"""
+{{"covered": [true, false, ...]}}
+数组长度必须等于要点数量，第 i 项表示第 i 个要点是否被覆盖。"""
 
 
 def load_cases(path: Path) -> list[dict[str, Any]]:
@@ -116,6 +118,17 @@ def llm_judge(
             raw = judge_llm.invoke(prompt)
             text = getattr(raw, "content", raw)
             data = _extract_json(str(text))
+            if isinstance(data.get("covered"), list):
+                covered = data["covered"]
+                if len(covered) != len(points):
+                    raise ValueError("covered 长度与要点数不一致")
+                missing = [
+                    list(group)
+                    for group, hit in zip(points, covered, strict=False)
+                    if not hit
+                ]
+                return (len(points) - len(missing)) / len(points), missing
+            # 兼容旧格式 {"score": ..., "missing": [...]}
             indexes = data.get("missing") or []
             missing = [
                 list(points[index])
@@ -200,6 +213,7 @@ def run_cases(
     judge_model: str | None = None,
     seed_docs: bool = True,
     only: str | None = None,
+    dump_dir: Path | None = None,
 ) -> dict[str, Any]:
     selected = cases[:limit] if limit else list(cases)
     if only:
@@ -221,13 +235,31 @@ def run_cases(
         started = time.monotonic()
         result = run(case["task"], f"eval-{run_id}-{case['id']}", eval_settings, registry)
         judged = judge(case["task"], transcript_text(result), case["points"]) if judge else None
-        return evaluate_case(
+        item = evaluate_case(
             case,
             result,
             time.monotonic() - started,
             min_score=min_score,
             judged=judged,
         )
+        if dump_dir is not None:
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "case": case,
+                "result": {key: item[key] for key in ("score", "passed", "scored_by", "stop_reason", "turns", "tokens")},
+                "messages": [
+                    {
+                        "type": type(message).__name__,
+                        "name": getattr(message, "name", None),
+                        "text": message_text(message),
+                    }
+                    for message in result.messages
+                ],
+            }
+            (dump_dir / f"{case['id']}.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        return item
 
     try:
         if workers > 1:
@@ -292,6 +324,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="不在评测工作区里预置项目文档（默认会放 README 与 docs/）",
     )
+    parser.add_argument(
+        "--dump",
+        type=Path,
+        default=None,
+        help="把每条用例的完整对话写到该目录（调试路由 / prompt 用）",
+    )
     parser.add_argument("--workers", type=int, default=1, help="并发用例数（默认 1）")
     parser.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
     parser.add_argument("--api-key", default=None)
@@ -336,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         judge_model=judge_model,
         seed_docs=not args.no_seed,
         only=args.only,
+        dump_dir=args.dump,
     )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

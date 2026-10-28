@@ -216,8 +216,11 @@ multi-agent-api --log-level DEBUG                # 默认跟随 MULTI_AGENT_LOG_
 
 几点约定：
 
-- **任务表在进程内**：重启后 `GET /tasks` 不认识旧任务，但检查点在；默认团队可用 `multi-agent --resume <thread_id>` 接着跑，
-  自定义 `registry` 的 thread 要在自己的脚本里用同一 registry 重新 `build_graph(registry=registry)` 再 `resume_task(...)`（CLI 只加载默认团队）；
+- **任务表默认落盘**：`multi-agent-api` 写入 `--task-db`（默认 `.multi_agent/tasks.sqlite`，`memory` 关闭）；
+  重启后 `completed` / `failed` / `canceled` 照旧可查，`queued` / `running` 视为中断并标记
+  `failed`（`error="service restarted before completion"`），`awaiting_approval` 会保留并可直接批准——
+  执行器用同一 registry 重建图，从检查点继续，不需要手工 `--resume`；
+  自定义 `registry` 的 thread 仍要在自己的脚本里用同一 registry 重新 `build_graph(registry=registry)` 再 `resume_task(...)`（CLI 只加载默认团队）；
 - **任务表会回收**：`--retention` 之后已结束任务从 `GET /tasks` 消失（再查 `404`）；表超过 `--max-records`
   时只淘汰已结束记录，`queued` / `running` / `awaiting_approval` 不会被挤掉；活跃记录占满上限后，
   新提交返回 `503`（`detail` 含 `task table is full`），等任务结束或调大 `--max-records`；待审批超过保留期转
@@ -296,6 +299,7 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 | `MULTI_AGENT_API_TASK_TIMEOUT` | 单任务执行超时秒数，默认 `1800`；`0` 不限 |
 | `MULTI_AGENT_API_RETENTION` | 任务记录保留秒数，默认 `86400`；`0` 关闭回收 |
 | `MULTI_AGENT_API_MAX_RECORDS` | 任务表容量上限，默认 `1000`（只淘汰已结束记录；活跃记录占满后新提交 `503`） |
+| `MULTI_AGENT_API_TASK_DB` | 任务表 SQLite 路径，默认 `.multi_agent/tasks.sqlite`；`memory` 只存进程内 |
 
 ## 设计约定
 
@@ -326,7 +330,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 76 个离线测试，不消耗 API
+pytest -q      # 79 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -365,7 +369,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（76 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（79 个，全部不联网）
 pytest -q
 
 # 3. 配密钥
@@ -385,8 +389,8 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 
 ## 还没做的
 
-- **跨重启的任务表**：API 的任务状态只在进程内，重启后旧任务查不到（检查点仍在，可 `--resume` 接着跑）。
-  要长期查询就得把任务表落到 SQLite，并把检查点表当内部实现、不对外暴露。
+- **任务表的跨进程一致性**：任务表已落 SQLite（`--task-db`），但仍是**单进程**语义——
+  多开 uvicorn worker 会各写各的记录、互相覆盖；要做多副本得换成带租约的任务队列。
 - **认证与限流**：API 没有鉴权、没有 CORS、没有限流，默认只监听回环地址，对外必须靠反向代理。
 - **细粒度中断**：取消在**节点边界**生效（`run_task_full(should_cancel=...)`），正在跑的那次模型调用
   仍会把它自己的请求做完。要在一次调用内打断，只能把 timeout 调小或在模型客户端层做；流式场景

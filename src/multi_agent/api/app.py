@@ -49,6 +49,7 @@ def create_app(
     task_timeout: float = 1800.0,
     retention: float = 86_400.0,
     max_records: int = 1000,
+    task_db: str | None = None,
 ) -> FastAPI:
     """构建应用；settings 为空时读环境变量（缺 key 会抛 RuntimeError）。"""
     settings = settings or Settings.from_env()
@@ -59,6 +60,7 @@ def create_app(
         task_timeout=task_timeout,
         retention=retention,
         max_records=max_records,
+        task_db=task_db,
     )
 
     @asynccontextmanager

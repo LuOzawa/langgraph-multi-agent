@@ -100,6 +100,66 @@ def test_run_cases_aggregates_limit_and_worker_order():
     assert report["results"][1]["missing_points"] == [["乙"]]
 
 
+def test_run_cases_prefers_judge_scores():
+    cases = [{"id": "one", "task": "任务", "points": [["甲"], ["乙"]]}]
+
+    def runner(task: str, thread_id: str, settings, registry) -> RunResult:
+        return _result("完全不含关键词")
+
+    def judge(task: str, answer: str, points):
+        return 0.9, [["乙"]]
+
+    report = ev.run_cases(
+        cases, settings=_settings(), runner=runner, judge=judge, judge_model="judge-x"
+    )
+    item = report["results"][0]
+    assert item["scored_by"] == "llm"
+    assert item["score"] == 0.9
+    assert item["passed"] is True
+    assert item["missing_points"] == [["乙"]]
+    assert report["judge_model"] == "judge-x"
+
+
+def test_llm_judge_parses_fenced_json():
+    class FakeLLM:
+        def invoke(self, prompt):
+            class Out:
+                content = '结果如下：\n```json\n{"score": 0.5, "missing": [1]}\n```'
+
+            return Out()
+
+    judge = ev.llm_judge(_settings(), llm=FakeLLM())
+    score, missing = judge("任务", "回答", [["甲"], ["乙"]])
+    assert score == 0.5
+    assert missing == [["乙"]]
+
+
+def test_llm_judge_falls_back_on_unparseable_output():
+    class FakeLLM:
+        def invoke(self, prompt):
+            class Out:
+                content = "我无法判断"
+
+            return Out()
+
+    judge = ev.llm_judge(_settings(), llm=FakeLLM())
+    assert judge("任务", "回答", [["甲"]]) is None
+
+
+def test_llm_judge_ignores_out_of_range_indexes():
+    class FakeLLM:
+        def invoke(self, prompt):
+            class Out:
+                content = '{"score": 1.5, "missing": [5]}'
+
+            return Out()
+
+    judge = ev.llm_judge(_settings(), llm=FakeLLM())
+    score, missing = judge("任务", "回答", [["甲"]])
+    assert score == 1.0
+    assert missing == []
+
+
 def test_main_writes_report_and_strict_exit(monkeypatch, tmp_path):
     cases = tmp_path / "cases.jsonl"
     cases.write_text('{"id": "a", "task": "t", "points": [["x"]]}\n', "utf-8")

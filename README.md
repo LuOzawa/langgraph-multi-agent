@@ -336,7 +336,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 82 个离线测试，不消耗 API
+pytest -q      # 86 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -357,8 +357,13 @@ API 测试用 `fastapi.testclient` + 假执行器，不联网；`.[dev]` 已包�
 ```bash
 python evals/run.py --limit 3                 # 读 .env / OPENAI_*
 python evals/run.py --model deepseek-v4-flash --base-url https://api.deepseek.com/v1
+python evals/run.py --judge                   # 模型判定要点覆盖（同义改写也算命中）
+python evals/run.py --judge-model gpt-4o      # 判分模型可与被测模型不同
 python evals/run.py --strict                  # 有未通过用例时 exit 1
 ```
+
+默认按关键词同义词匹配打分；`--judge` / `--judge-model` 改为让模型判定覆盖度
+（输出 `{"score": 0-1, "missing": [编号]}`），解析失败自动退回关键词打分，不会让评测中断。
 
 用例在 `evals/cases.jsonl`：`points` 是「要点组」，组内词为同义、命中任一即算满足；
 得分 = 命中组数 / 总组数，默认 `--min-score 0.6` 且 `stop_reason` 必须是 `finish`。
@@ -375,7 +380,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（82 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（86 个，全部不联网）
 pytest -q
 
 # 3. 配密钥
@@ -411,8 +416,8 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
   加 `fx_rate`（CNY/USD）与 `fob_cny` 参数，汇率缺失时报错而不是静默用 1.0。
 - **可观测性**：有结构化日志和 token 统计，但没有链路追踪。接 LangSmith 只需设
   `LANGCHAIN_TRACING_V2` + `LANGCHAIN_API_KEY`，不用改代码。
-- **更完整的评测**：`evals/` 目前是 10 条要点命中用例 + token/耗时统计；缺的是人工标注的更大用例集、
-  LLM-as-judge 打分（现为同义词子串匹配，会漏掉同义改写）以及按 prompt/模型的多轮对比报表。
+- **更完整的评测**：`evals/` 已支持关键词与 `--judge` 模型打分、token/耗时统计；缺的是人工标注的
+  更大用例集、多次运行取均值（当前单次采样）以及按 prompt/模型的多轮对比报表。
 
 ## 文档
 

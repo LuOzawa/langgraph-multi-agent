@@ -20,6 +20,8 @@
 - 节点边界取消：`run_task_full` / `resume_task` 新增 `should_cancel` 回调，命中后停止后续节点并返回
   `stop_reason="canceled"`；API 的 `DELETE`、超时、审批过期都会给执行器发取消信号
 - `evals/`：真实模型评测入口（`python evals/run.py`），要点命中打分 + tokens/耗时报告 + `--strict` 退出码
+- 评测判分可选 `--judge` / `--judge-model`：由模型判断要点覆盖（同义改写也算命中），
+  解析失败自动退回关键词打分；报告标注 `scored_by`
 - 任务表持久化：`--task-db` / `MULTI_AGENT_API_TASK_DB`（默认 `.multi_agent/tasks.sqlite`，`memory` 关闭）。
   重启后已结束任务照旧可查，中断的 `queued` / `running` 标 `failed`，`awaiting_approval` 保留并可
   直接批准（执行器用同一 registry 重建图从检查点继续）

@@ -11,6 +11,7 @@
 
 `points` 是「要点组」的列表：一组内的词是**同义**，命中任意一个即算该要点满足；
 得分 = 满足的组数 / 总组数。默认 `--min-score 0.6` 且 `stop_reason` 必须是 `finish` 才算通过。
+加 `--judge` / `--judge-model` 时改用模型判定覆盖语义（同义改写也能算命中），解析失败自动退回关键词打分。
 """
 
 from __future__ import annotations
@@ -31,13 +32,28 @@ from dotenv import load_dotenv
 
 from multi_agent.config import Settings
 from multi_agent.graph import RunResult, run_task_full
-from multi_agent.registry import AgentRegistry
+from multi_agent.registry import AgentRegistry, make_llm
 
 DEFAULT_CASES = Path(__file__).with_name("cases.jsonl")
 DEFAULT_OUT = Path(__file__).with_name("report.json")
 DEFAULT_MIN_SCORE = 0.6
 
 Runner = Callable[[str, str, Settings, AgentRegistry | None], RunResult]
+Judge = Callable[[str, str, list[list[str]]], tuple[float, list[list[str]]] | None]
+
+JUDGE_PROMPT = """你在给一次问答打分。只判断语义是否覆盖要点，不要因为措辞不同而扣分。
+
+任务：
+{task}
+
+回答：
+{answer}
+
+要点（编号）：
+{points}
+
+只输出 JSON，不要解释：
+{{"score": 0 到 1 之间的小数, "missing": [未覆盖的要点编号]}}"""
 
 
 def load_cases(path: Path) -> list[dict[str, Any]]:
@@ -66,19 +82,75 @@ def score_answer(answer: str, points: list[list[str]]) -> tuple[float, list[list
     return (total - len(missing)) / total if total else 0.0, missing
 
 
+def _extract_json(text: str) -> dict[str, Any]:
+    """从模型输出里抠出第一个 JSON 对象（容忍 ```json 围栏与前后废话）。"""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError(f"没有 JSON 对象: {text[:80]!r}")
+    data = json.loads(text[start : end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("判分结果不是对象")
+    return data
+
+
+def llm_judge(
+    settings: Settings,
+    model: str | None = None,
+    *,
+    llm: Any | None = None,
+) -> Judge:
+    """用模型判定要点覆盖度；解析失败返回 None，由调用方退回关键词打分。"""
+    judge_llm = llm or make_llm(settings, model=model or settings.model)
+
+    def judge(task: str, answer: str, points: list[list[str]]) -> tuple[float, list[list[str]]] | None:
+        numbered = "\n".join(
+            f"{index}. " + " / ".join(str(word) for word in group)
+            for index, group in enumerate(points)
+        )
+        prompt = JUDGE_PROMPT.format(task=task, answer=answer, points=numbered)
+        try:
+            raw = judge_llm.invoke(prompt)
+            text = getattr(raw, "content", raw)
+            data = _extract_json(str(text))
+            indexes = data.get("missing") or []
+            missing = [
+                list(points[index])
+                for index in indexes
+                if isinstance(index, int) and 0 <= index < len(points)
+            ]
+            if "score" in data:
+                score = float(data["score"])
+            else:
+                score = 1 - len(missing) / len(points)
+            return max(0.0, min(1.0, score)), missing
+        except Exception:  # noqa: BLE001 - 判分失败不应让评测挂掉
+            return None
+
+    return judge
+
+
 def evaluate_case(
     case: dict[str, Any],
     result: RunResult,
     latency_s: float,
     *,
     min_score: float,
+    judged: tuple[float, list[list[str]]] | None = None,
 ) -> dict[str, Any]:
-    score, missing = score_answer(result.answer, case["points"])
+    if judged is None:
+        score, missing = score_answer(result.answer, case["points"])
+        scored_by = "keywords"
+    else:
+        score, missing = judged
+        score = max(0.0, min(1.0, float(score)))
+        scored_by = "llm"
     passed = score >= min_score and result.stop_reason == "finish"
     return {
         "id": case["id"],
         "score": round(score, 3),
         "passed": passed,
+        "scored_by": scored_by,
         "stop_reason": result.stop_reason,
         "turns": result.turns,
         "tokens": int((result.usage or {}).get("total_tokens", 0)),
@@ -101,6 +173,8 @@ def run_cases(
     workers: int = 1,
     min_score: float = DEFAULT_MIN_SCORE,
     runner: Runner | None = None,
+    judge: Judge | None = None,
+    judge_model: str | None = None,
 ) -> dict[str, Any]:
     selected = cases[:limit] if limit else list(cases)
     run = runner or _default_runner
@@ -108,7 +182,14 @@ def run_cases(
     def one(case: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
         result = run(case["task"], f"eval-{case['id']}", settings, registry)
-        return evaluate_case(case, result, time.monotonic() - started, min_score=min_score)
+        judged = judge(case["task"], result.answer, case["points"]) if judge else None
+        return evaluate_case(
+            case,
+            result,
+            time.monotonic() - started,
+            min_score=min_score,
+            judged=judged,
+        )
 
     if workers > 1:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="eval") as pool:
@@ -124,6 +205,7 @@ def run_cases(
         "supervisor_model": settings.supervisor_model,
         "base_url": settings.base_url,
         "min_score": min_score,
+        "judge_model": judge_model,
         "summary": {
             "cases": len(results),
             "passed": passed,
@@ -165,6 +247,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument(
+        "--judge",
+        action="store_true",
+        help="用模型判定要点覆盖度（默认关键词匹配）",
+    )
+    parser.add_argument(
+        "--judge-model", default=None, help="判分模型（默认与 --model 相同）"
+    )
+    parser.add_argument(
         "--strict", action="store_true", help="有未通过用例时返回非零退出码"
     )
     args = parser.parse_args(argv)
@@ -179,12 +269,20 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
+    judge = None
+    judge_model = None
+    if args.judge or args.judge_model:
+        judge_model = args.judge_model or settings.model
+        judge = llm_judge(settings, judge_model)
+
     report = run_cases(
         cases,
         settings=settings,
         limit=args.limit,
         workers=max(1, args.workers),
         min_score=args.min_score,
+        judge=judge,
+        judge_model=judge_model,
     )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

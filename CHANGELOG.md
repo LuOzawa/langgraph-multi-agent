@@ -24,6 +24,18 @@
 - 日志级别统一校验：`MULTI_AGENT_LOG_LEVEL` 与 `--log-level` 非法时启动即报错（CLI 原先静默退回 WARNING），
   可选 `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`
 
+### Fixed
+- 取消竞态：`DELETE` 落在「已批准、resume 未开始」之间时，已批准的高风险动作仍会执行。
+  现在 `_resume` 复查任务状态，且审批提交与状态变更在同一把锁内
+- 审计缺口：`resume_task`（`--resume` / `/resume` / `POST /approvals`）过去不写审计，现统一在 resume 路径写入；
+  没有挂起审批时抛 `ValueError`，不再起幽灵 run 烧 token
+- CLI 退出码：`stop_reason="error"` 的任务现在返回 `1`（原先恒为 `0`）
+- 非交互审批：已输入 `y` 但备注行读到 EOF 时不再被判为拒绝
+- `approval_tools` 写了不存在的工具名时构建期直接报错（原先静默不包审批闸）
+- `approver` 返回 bool 时审计不再抛 `AttributeError`
+- 空的 `MULTI_AGENT_API_HOST=` 不再让 uvicorn 绑到 `0.0.0.0`；`--log-level` 现在同时控制 uvicorn 日志
+- `tools/compat_probe.py` 支持 `.env` / `OPENAI_*`，缺配置时给出用法提示而非 traceback
+
 ## [0.4.0] - 2026-10-27
 
 ### Added

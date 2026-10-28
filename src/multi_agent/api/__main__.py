@@ -51,13 +51,18 @@ def _env_float(name: str, default: float, *, low: float) -> float:
     return value
 
 
+def _resolve_host(value: str | None) -> str:
+    """空值/空白回落回环地址，避免 uvicorn 绑到 0.0.0.0。"""
+    return (value or "").strip() or DEFAULT_HOST
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="multi-agent-api", description="多 Agent 协作 HTTP API 服务"
     )
     parser.add_argument(
         "--host",
-        default=os.getenv("MULTI_AGENT_API_HOST", DEFAULT_HOST),
+        default=os.getenv("MULTI_AGENT_API_HOST"),
         help=f"监听地址（默认 {DEFAULT_HOST}）",
     )
     parser.add_argument("--port", type=int, default=None, help=f"监听端口（默认 {DEFAULT_PORT}）")
@@ -143,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
 
         from multi_agent.api.app import create_app
     except ImportError:
-        print('缺少 API 依赖：pip install "multi-agent[api]"', file=sys.stderr)
+        print('缺少 API 依赖：在仓库根目录执行 pip install -e ".[api]"', file=sys.stderr)
         return 1
 
     try:
@@ -174,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"启动失败: {exc}", file=sys.stderr)
         return 1
 
-    uvicorn.run(app, host=args.host, port=port)
+    uvicorn.run(app, host=_resolve_host(args.host), port=port, log_level=level.lower())
     return 0
 
 

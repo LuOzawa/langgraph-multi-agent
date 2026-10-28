@@ -12,6 +12,22 @@
 multi-agent "用三句话说明这个框架怎么扩展"
 ```
 
+## 安装
+
+本项目**尚未发布到 PyPI**（PyPI 上的 `multi-agent` 是另一个项目），请从源码安装：
+
+```bash
+git clone https://github.com/LuOzawa/langgraph-multi-agent.git
+cd langgraph-multi-agent
+
+python3.11 -m venv .venv && source .venv/bin/activate
+# Windows: py -3.11 -m venv .venv && .venv\Scripts\activate
+
+pip install -e "."            # 运行时最小依赖
+pip install -e ".[dev]"       # 加测试与静态检查（pytest / ruff / mypy）
+pip install -e ".[api]"       # 需要 HTTP 服务时（多一个 uvicorn）
+```
+
 ## 它在解决什么
 
 写多 Agent 系统的难点不在「调通一次对话」，而在**它跑起来之后的事**：
@@ -27,13 +43,9 @@ multi-agent "用三句话说明这个框架怎么扩展"
 
 ## 快速开始
 
-需要 Python 3.10+（推荐 3.11）。
+需要 Python 3.10+（推荐 3.11）。先按上一节 clone 并 `pip install -e ".[dev]"`，然后：
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
 cp .env.example .env
 # 编辑 .env：填入 OPENAI_API_KEY；用兼容中转时改 OPENAI_BASE_URL
 # 注意：密钥留空会直接报错，不要留 `***` 之类的占位符
@@ -49,6 +61,9 @@ python -m multi_agent
 # 任务> 把上一步整理成给同事的一页说明
 # /new 新建会话   空行退出
 ```
+
+脚本 / CI 里看退出码：`stop_reason="error"` 的任务返回 `1`，其余（含 `awaiting_approval`）返回 `0`；
+挂起的审批用 `--resume <thread_id>` 接着处理。
 
 ## 结构
 
@@ -72,6 +87,7 @@ examples/
   ecommerce_team.py  # 跨境电商团队（含审批门）
 tests/
   test_config.py     # Settings 校验（日志级别等）
+  test_cli.py        # CLI 退出码与审批提示
   test_registry.py   # 注册表行为
   test_graph.py      # 路由/失败隔离/持久化/审批/裁剪
   test_tools.py      # 定价工具
@@ -174,7 +190,7 @@ ERP、飞书、前端不想装 Python 时，用 `multi-agent-api` 把同一套�
 ```bash
 pip install -e ".[api]"
 OPENAI_API_KEY=sk-... multi-agent-api            # 默认 127.0.0.1:8000
-multi-agent-api --host 0.0.0.0 --port 8765 --max-workers 8 --task-timeout 900
+multi-agent-api --host 0.0.0.0 --port 8765 --max-workers 8 --task-timeout 900  # 0.0.0.0 仅在有鉴权代理后使用
 multi-agent-api --log-level DEBUG                # 默认跟随 MULTI_AGENT_LOG_LEVEL
 ```
 
@@ -200,25 +216,26 @@ multi-agent-api --log-level DEBUG                # 默认跟随 MULTI_AGENT_LOG_
 
 几点约定：
 
-- **任务表在进程内**：重启后 `GET /tasks` 不认识旧任务，但检查点在，可用 `multi-agent --resume <thread_id>` 接着跑；
+- **任务表在进程内**：重启后 `GET /tasks` 不认识旧任务，但检查点在；默认团队可用 `multi-agent --resume <thread_id>` 接着跑，
+  自定义 `registry` 的 thread 要在自己的脚本里用同一 registry 重新 `build_graph(registry=registry)` 再 `resume_task(...)`（CLI 只加载默认团队）；
 - **任务表会回收**：`--retention` 之后已结束任务从 `GET /tasks` 消失（再查 `404`）；表超过 `--max-records`
   时只淘汰已结束记录，`queued` / `running` / `awaiting_approval` 不会被挤掉；待审批超过保留期转
-  `canceled`（`error="approval expired"`），先释放图实例与 SQLite 连接；
+  `canceled`（`error="approval expired"`），记录里的图实例同时释放（SQLite 连接按线程复用，不随记录关闭）；
 - **取消是软取消**：`DELETE` 立即返回 `canceled`，但 Python 线程无法强杀，底层模型调用会继续到
   `OPENAI_TIMEOUT`（默认 120s），结果被丢弃——这期间该 worker 仍被占用；
 - **执行超时**：`--task-timeout` 作用于 `queued` / `running`，批准审批后重新计时，超时 `error="task timed out after Ns"`；
 - **单进程**：任务并发由 `--max-workers` 控制，不要给 uvicorn 开多 worker（每个进程一份任务表）；
-- **审批串到同一条审计链路**：每次决策照旧追加 JSONL（`MULTI_AGENT_AUDIT_LOG`）；
+- **审批串到同一条审计链路**：每次决策（含 `--resume` / `POST /approvals`）追加 JSONL（`MULTI_AGENT_AUDIT_LOG`）；
 - **没有内置认证**：默认只监听回环地址，对外暴露请让反向代理做认证。
 
 ```bash
 curl -s -X POST localhost:8000/tasks -H 'content-type: application/json' \
-     -d '{"task": "上架收纳盒到亚马逊美国站"}'
+     -d '{"task": "上架收纳盒到亚马逊美国站", "thread_id": "api-1a2b3c4d"}'
 curl -s localhost:8000/tasks/api-1a2b3c4d
 curl -s localhost:8000/approvals
 curl -s -X POST localhost:8000/approvals/api-1a2b3c4d \
      -H 'content-type: application/json' -d '{"approved": true, "note": "复核通过"}'
-curl -s -X DELETE localhost:8000/tasks/api-1a2b3c4d   # 202 + canceled（软取消，幂等）
+curl -s -X DELETE localhost:8000/tasks/api-1a2b3c4d   # 运行中 202 + canceled；已结束 409
 ```
 
 ## 扩展
@@ -306,7 +323,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 51 个离线测试，不消耗 API
+pytest -q      # 61 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -330,14 +347,16 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（51 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（61 个，全部不联网）
 pytest -q
 
 # 3. 配密钥
 cp .env.example .env   # 填 OPENAI_API_KEY
 
-# 4. 验证你的中转是否兼容（假设用 deepseek）
+# 4. 验证你的中转是否兼容（默认读 .env 的 OPENAI_*；也可指定 provider / 显式参数）
+python tools/compat_probe.py
 python tools/compat_probe.py --provider deepseek
+python tools/compat_probe.py --api-key sk-... --base-url https://... --model gpt-4o-mini
 
 # 5. 跑一次跨境示例，确认整条链路
 python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美国站"

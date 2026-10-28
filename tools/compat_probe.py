@@ -2,20 +2,24 @@
 """模型 / 中转兼容性探针。
 
 用法：
-    python tools/compat_probe.py --provider deepseek
-    python tools/compat_probe.py --base-url https://... --model ... --api-key ...
+    python tools/compat_probe.py                      # 读 .env / OPENAI_* 环境变量
+    python tools/compat_probe.py --provider deepseek  # 读 ~/.openclaw/openclaw.json 的 provider
+    python tools/compat_probe.py --api-key sk-... --base-url https://... --model ...
 
 三个探针：普通对话、工具调用、structured output（json_schema）。
-不读项目的 .env，只读 --api-key 或本机 openclaw provider 配置。
+凭据优先级：`--api-key`（base/model 可从环境补）→ `OPENAI_API_KEY` 等环境变量/.env →
+openclaw provider 配置。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
@@ -34,8 +38,31 @@ def get_weather(city: str) -> str:
     return f"{city}: 晴 25C"
 
 
+def _from_env() -> tuple[str, str, str] | None:
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        return None
+    return (
+        api_key,
+        (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").strip(),
+        (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip(),
+    )
+
+
 def _from_openclaw(provider: str, config: Path) -> tuple[str, str, str]:
-    data = json.loads(config.read_text(encoding="utf-8"))
+    try:
+        text = config.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"找不到 {config}。改用 --api-key/--base-url/--model，"
+            "或先复制 .env.example 为 .env 并填 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL"
+        ) from exc
+    except OSError as exc:
+        raise SystemExit(f"读取 {config} 失败: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{config} 不是合法 JSON: {exc}") from exc
     entry = data.get("models", {}).get("providers", {}).get(provider)
     if not entry:
         raise SystemExit(f"openclaw 配置里没有 provider: {provider}")
@@ -57,7 +84,7 @@ def _attempt(name: str, fn) -> dict:
         }
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", default="deepseek", help="openclaw.json 里的 provider 名")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -65,14 +92,24 @@ def main() -> int:
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=40)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    load_dotenv()
 
     if args.api_key:
-        api_key, base_url, model = args.api_key, args.base_url or "", args.model or ""
+        api_key = args.api_key
+        base_url = (args.base_url or os.getenv("OPENAI_BASE_URL") or "").strip()
+        model = (args.model or os.getenv("OPENAI_MODEL") or "").strip()
         if not base_url or not model:
-            raise SystemExit("使用 --api-key 时需要同时提供 --base-url 与 --model")
+            raise SystemExit(
+                "使用 --api-key 时需要同时提供 --base-url 与 --model"
+                "（或设置 OPENAI_BASE_URL / OPENAI_MODEL）"
+            )
     else:
-        api_key, base_url, model = _from_openclaw(args.provider, args.config)
+        from_env = _from_env()
+        if from_env is not None:
+            api_key, base_url, model = from_env
+        else:
+            api_key, base_url, model = _from_openclaw(args.provider, args.config)
 
     llm = ChatOpenAI(
         model=model, api_key=api_key, base_url=base_url,

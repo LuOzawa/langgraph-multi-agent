@@ -82,9 +82,19 @@ def main() -> int:
     def approver(payload: dict) -> dict:
         print(f"\n[需要审批] {payload.get('agent')}：{payload.get('reason')}")
         print(f"任务：{str(payload.get('task', ''))[:160]}")
-        answer = input("批准执行？[y/N] ").strip().lower()
-        note = input("备注（可空）: ").strip() if answer in {"y", "yes"} else ""
-        return {"approved": answer in {"y", "yes"}, "note": note}
+        try:
+            answer = input("批准执行？[y/N] ").strip().lower()
+        except EOFError:
+            print("（非交互环境，默认拒绝）")
+            return {"approved": False, "note": "非交互环境，默认拒绝"}
+        approved = answer in {"y", "yes"}
+        note = ""
+        if approved:
+            try:
+                note = input("备注（可空）: ").strip()
+            except EOFError:
+                note = ""
+        return {"approved": approved, "note": note}
 
     result = run_task_full(task, registry=registry, app=app, approver=approver)
     print(f"\n{result.answer}")

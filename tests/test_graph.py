@@ -479,3 +479,74 @@ def test_sqlite_saver_resumes_from_another_thread(monkeypatch, tmp_path):
     assert resumed.stop_reason == "finish"
     assert resumed.answer == "PUBLISH-产出"
     assert called == ["PUBLISH"]
+
+
+def test_resume_task_writes_audit_and_requires_pending(monkeypatch, tmp_path):
+    called: list[str] = []
+    _recording_agents(monkeypatch, called)
+    _reset(["publisher", "FINISH"])
+    audit = tmp_path / "approvals.jsonl"
+    settings = _settings(audit_log=str(audit))
+    registry = _approval_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    pending = G.run_task_full(
+        "把 SKU-1 上架", settings=settings, registry=registry, thread_id="r-audit", app=app
+    )
+    assert pending.stop_reason == "awaiting_approval"
+
+    result = G.resume_task(
+        "r-audit",
+        {"approved": True, "note": "同意"},
+        settings=settings,
+        registry=registry,
+        app=app,
+    )
+    assert result.answer == "PUBLISH-产出"
+    rows = [json.loads(line) for line in audit.read_text("utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["approved"] is True
+    assert rows[0]["note"] == "同意"
+
+    with pytest.raises(ValueError, match="没有挂起的审批"):
+        G.resume_task("r-audit", {"approved": True}, settings=settings, registry=registry, app=app)
+
+
+def test_approver_returning_bool_is_accepted(monkeypatch, tmp_path):
+    called: list[str] = []
+    _recording_agents(monkeypatch, called)
+    _reset(["publisher", "FINISH"])
+    audit = tmp_path / "approvals.jsonl"
+    settings = _settings(audit_log=str(audit))
+    registry = _approval_registry()
+    app = G.build_graph(settings=settings, registry=registry, checkpointer=InMemorySaver())
+
+    result = G.run_task_full(
+        "把 SKU-1 上架",
+        settings=settings,
+        registry=registry,
+        thread_id="bool-ap",
+        app=app,
+        approver=lambda payload: True,
+    )
+
+    assert result.answer == "PUBLISH-产出"
+    rows = [json.loads(line) for line in audit.read_text("utf-8").splitlines()]
+    assert len(rows) == 1 and rows[0]["approved"] is True
+
+
+def test_unknown_approval_tool_rejected():
+    from multi_agent.registry import AgentRegistry, AgentSpec
+
+    registry = AgentRegistry()
+    registry.register(
+        AgentSpec(
+            name="pricing",
+            description="定价",
+            system_prompt="PRICING",
+            tools_factory=lambda: (),
+            approval_tools=("no_such_tool",),
+        )
+    )
+    with pytest.raises(ValueError, match="approval_tools 未命中工具"):
+        G.build_graph(settings=_settings(), registry=registry, checkpointer=InMemorySaver())

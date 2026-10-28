@@ -43,7 +43,6 @@ def create_app(
     executor = executor or LangGraphExecutor(settings, registry)
     manager = TaskManager(
         executor,
-        settings,
         max_workers=max_workers,
         task_timeout=task_timeout,
         retention=retention,

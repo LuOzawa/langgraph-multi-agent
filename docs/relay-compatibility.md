@@ -27,8 +27,12 @@
 ## 复现
 
 ```bash
-# 需要本机已配置 openclaw provider（或自己填 OPENAI_API_KEY / OPENAI_BASE_URL）
+# 读 .env / OPENAI_* 环境变量（推荐，见 README 本地开发第 3 步）
+python tools/compat_probe.py
+# 或读本机 openclaw provider 配置
 python tools/compat_probe.py --provider deepseek
+# 或显式传参
+python tools/compat_probe.py --api-key sk-... --base-url https://... --model ...
 ```
 
 ## 尚未覆盖

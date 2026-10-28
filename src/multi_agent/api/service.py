@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from multi_agent.api.schemas import ApprovalView, TaskStatus, TaskView
-from multi_agent.audit import record_approval
 from multi_agent.config import Settings
 from multi_agent.graph import RunResult, build_graph, resume_task, run_task_full
 from multi_agent.registry import AgentRegistry
@@ -121,7 +120,6 @@ class TaskManager:
     def __init__(
         self,
         executor: Executor,
-        settings: Settings,
         *,
         max_workers: int = 4,
         task_timeout: float = 1800.0,
@@ -137,7 +135,6 @@ class TaskManager:
         if max_records < 1:
             raise ValueError("max_records must be >= 1")
         self._executor = executor
-        self._settings = settings
         self._lock = threading.Lock()
         self._records: dict[str, _TaskRecord] = {}
         self._pool = ThreadPoolExecutor(
@@ -223,7 +220,6 @@ class TaskManager:
                 raise TaskNotFound("task not found")
             if record.status != TaskStatus.AWAITING_APPROVAL or not record.pending:
                 raise TaskConflict("task is not awaiting approval")
-            payload = dict(record.pending)
             app = record.app
             record.status = TaskStatus.RUNNING
             record.pending = None
@@ -233,23 +229,12 @@ class TaskManager:
             if app is None:
                 self._mark_failed(record, "task app is unavailable")
                 raise TaskConflict("task app is unavailable")
-
-        try:
-            record_approval(
-                settings=self._settings,
-                thread_id=thread_id,
-                payload=payload,
-                decision=dict(decision),
-            )
-        except Exception:  # 审计失败不应阻断审批
-            logger.warning("审批审计写入失败 thread_id=%s", thread_id, exc_info=True)
-
-        try:
-            self._pool.submit(self._resume, thread_id, app, decision)
-        except RuntimeError as exc:
-            with self._lock:
+            try:
+                # 持锁提交：避免「已批准 → 提交前被取消」的窗口执行到已取消任务
+                self._pool.submit(self._resume, thread_id, app, dict(decision))
+            except RuntimeError as exc:
                 self._mark_failed(record, "task manager is shutting down")
-            raise TaskUnavailable("task manager is shutting down") from exc
+                raise TaskUnavailable("task manager is shutting down") from exc
         return view
 
     def cancel(self, thread_id: str) -> TaskView:
@@ -333,6 +318,10 @@ class TaskManager:
                     self._mark_failed(current, _describe(exc))
 
     def _resume(self, thread_id: str, app: Any, decision: dict[str, Any]) -> None:
+        with self._lock:
+            current = self._records.get(thread_id)
+            if current is None or current.status is not TaskStatus.RUNNING:
+                return  # 已取消 / 超时的任务不得再执行已批准的审批
         try:
             result = self._executor.resume(thread_id, decision, app)
             self._apply(thread_id, result, app)

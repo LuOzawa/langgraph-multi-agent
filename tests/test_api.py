@@ -109,9 +109,8 @@ class BlockingExecutor:
 
 
 def _client(executor: Any, settings: Settings | None = None, **kwargs) -> TestClient:
-    app = create_app(
-        settings=settings or _settings(), executor=executor, max_workers=2, **kwargs
-    )
+    kwargs.setdefault("max_workers", 2)
+    app = create_app(settings=settings or _settings(), executor=executor, **kwargs)
     return TestClient(app)
 
 
@@ -156,13 +155,12 @@ def test_generated_thread_id():
         assert THREAD_ID_PATTERN.match(thread_id)
 
 
-def test_submit_approval_flow(tmp_path):
-    audit = tmp_path / "approvals.jsonl"
+def test_submit_approval_flow():
     executor = FakeExecutor(
         start_result=lambda task, thread_id: _awaiting("publisher"),
         resume_result=lambda thread_id, decision, app: _completed("已上架"),
     )
-    with _client(executor, _settings(audit_log=str(audit))) as client:
+    with _client(executor) as client:
         response = client.post("/tasks", json={"task": "上架新品", "thread_id": "t-approve"})
         assert response.status_code == 202
 
@@ -190,13 +188,12 @@ def test_submit_approval_flow(tmp_path):
         assert client.get("/approvals").json() == []
 
 
-def test_reject_approval(tmp_path):
-    audit = tmp_path / "approvals.jsonl"
+def test_reject_approval():
     executor = FakeExecutor(
         start_result=lambda task, thread_id: _awaiting(),
         resume_result=lambda thread_id, decision, app: _completed("已拒绝，未执行"),
     )
-    with _client(executor, _settings(audit_log=str(audit))) as client:
+    with _client(executor) as client:
         client.post("/tasks", json={"task": "上架新品", "thread_id": "t-reject"})
         _wait(client, "t-reject", "awaiting_approval")
 
@@ -208,28 +205,40 @@ def test_reject_approval(tmp_path):
         assert final["answer"] == "已拒绝，未执行"
 
         assert executor.resumes[0][1] == {"approved": False, "note": "价格未确认"}
-        rows = [json.loads(line) for line in audit.read_text("utf-8").splitlines()]
-        assert len(rows) == 1
-        assert rows[0]["approved"] is False
-        assert rows[0]["thread_id"] == "t-reject"
 
 
-def test_audit_log_written(tmp_path):
-    audit = tmp_path / "approvals.jsonl"
-    executor = FakeExecutor(start_result=lambda task, thread_id: _awaiting("writer"))
-    with _client(executor, _settings(audit_log=str(audit))) as client:
-        client.post("/tasks", json={"task": "发布公告", "thread_id": "t-audit"})
-        _wait(client, "t-audit", "awaiting_approval")
-        client.post("/approvals/t-audit", json={"approved": True, "note": "OK"})
-        _wait(client, "t-audit", "completed")
+def test_real_graph_reject_writes_audit(monkeypatch, tmp_path):
+    """拒绝也要留痕：审计由 resume 路径写入，走真实图验证。"""
+
+    _patch_graph(monkeypatch, ["publisher", "FINISH"])
+    registry = AgentRegistry()
+    registry.register(
+        AgentSpec(
+            name="publisher",
+            description="上架商品（高风险）",
+            system_prompt="PUBLISH",
+            requires_approval=True,
+        )
+    )
+    audit = tmp_path / "audit.jsonl"
+    settings = _settings(audit_log=str(audit), checkpoint_db=str(tmp_path / "c.sqlite"))
+
+    app = create_app(settings=settings, registry=registry, max_workers=2)
+    with TestClient(app) as client:
+        client.post("/tasks", json={"task": "把 SKU-2 上架", "thread_id": "it-reject"})
+        _wait(client, "it-reject", "awaiting_approval", timeout=5.0)
+        response = client.post(
+            "/approvals/it-reject", json={"approved": False, "note": "价格未确认"}
+        )
+        assert response.status_code == 202, response.text
+        _wait(client, "it-reject", "completed", timeout=5.0)
 
     rows = [json.loads(line) for line in audit.read_text("utf-8").splitlines()]
     assert len(rows) == 1
-    row = rows[0]
-    assert row["thread_id"] == "t-audit"
-    assert row["agent"] == "writer"
-    assert row["approved"] is True
-    assert row["note"] == "OK"
+    assert rows[0]["thread_id"] == "it-reject"
+    assert rows[0]["agent"] == "publisher"
+    assert rows[0]["approved"] is False
+    assert rows[0]["note"] == "价格未确认"
 
 
 def test_duplicate_thread_id_409():
@@ -502,6 +511,48 @@ def test_max_records_evicts_oldest_finished():
             "t-cap2",
             "t-cap3",
         ]
+
+
+def test_cancel_between_approve_and_resume_skips_action():
+    """批准后、resume 真正开始前后到达的取消，不能让已批准的动作执行。"""
+
+    executor = FakeExecutor(start_result=lambda task, thread_id: _awaiting())
+    app = create_app(settings=_settings(), executor=executor, max_workers=2)
+    manager = app.state.manager
+    submitted: list[tuple[Any, tuple[Any, ...]]] = []
+
+    class DeferredPool:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+
+        def shutdown(self, **kwargs):
+            return None
+
+    manager._pool = DeferredPool()
+    with TestClient(app) as client:
+        assert client.post("/tasks", json={"task": "上架", "thread_id": "t-race"}).status_code == 202
+        run_fn, run_args = submitted.pop(0)
+        run_fn(*run_args)
+        _wait(client, "t-race", "awaiting_approval")
+
+        assert client.post("/approvals/t-race", json={"approved": True}).status_code == 202
+        resume_fn, resume_args = submitted.pop(0)  # 已排队但尚未执行
+        assert client.delete("/tasks/t-race").status_code == 202
+
+        resume_fn(*resume_args)  # 模拟线程池随后执行
+        assert executor.resumes == []  # 取消后不得执行已批准动作
+        final = client.get("/tasks/t-race").json()
+        assert final["status"] == "canceled"
+        assert final["error"] == "task canceled by client"
+
+
+def test_resolve_host_never_returns_blank():
+    from multi_agent.api.__main__ import _resolve_host
+
+    assert _resolve_host(None) == "127.0.0.1"
+    assert _resolve_host("") == "127.0.0.1"
+    assert _resolve_host("   ") == "127.0.0.1"
+    assert _resolve_host(" 0.0.0.0 ") == "0.0.0.0"
 
 
 def _patch_graph(monkeypatch, decisions):

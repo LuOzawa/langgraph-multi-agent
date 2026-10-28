@@ -58,12 +58,21 @@ def _prompt_approval(payload: dict) -> dict:
         print("  --------------------")
     try:
         answer = input("  批准执行？[y/N] ").strip().lower()
-        note = ""
-        if answer in {"y", "yes"}:
-            note = input("  备注（可空）: ").strip()
     except EOFError:
         return {"approved": False, "note": "非交互环境，默认拒绝"}
-    return {"approved": answer in {"y", "yes"}, "note": note}
+    approved = answer in {"y", "yes"}
+    note = ""
+    if approved:
+        try:
+            note = input("  备注（可空）: ").strip()
+        except EOFError:
+            note = ""  # 备注读到 EOF 不影响已经给出的批准
+    return {"approved": approved, "note": note}
+
+
+def _exit_code(result) -> int:
+    """失败任务返回非零，便于脚本 / CI 判断。"""
+    return 1 if result.stop_reason == "error" else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -134,31 +143,31 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
-    def run(text: str) -> None:
-        show(
-            run_task_full(
-                text,
-                settings=settings,
-                app=app,
-                thread_id=thread_id,
-                on_event=on_event,
-                approver=approver,
-                auto_approve=args.auto_approve,
-            )
+    def run(text: str):
+        result = run_task_full(
+            text,
+            settings=settings,
+            app=app,
+            thread_id=thread_id,
+            on_event=on_event,
+            approver=approver,
+            auto_approve=args.auto_approve,
         )
+        show(result)
+        return result
 
-    def resume(decision: dict) -> None:
-        show(
-            resume_task(
-                thread_id,
-                decision,
-                settings=settings,
-                app=app,
-                on_event=on_event,
-                approver=approver,
-                auto_approve=args.auto_approve,
-            )
+    def resume(decision: dict):
+        result = resume_task(
+            thread_id,
+            decision,
+            settings=settings,
+            app=app,
+            on_event=on_event,
+            approver=approver,
+            auto_approve=args.auto_approve,
         )
+        show(result)
+        return result
 
     if args.resume:
         payload = pending_approval(app, args.resume)
@@ -172,13 +181,11 @@ def main(argv: list[str] | None = None) -> int:
             else _prompt_approval(payload)
         )
         thread_id = args.resume
-        resume(decision)
-        return 0
+        return _exit_code(resume(decision))
 
     task = " ".join(args.task).strip()
     if task:
-        run(task)
-        return 0
+        return _exit_code(run(task))
 
     print(
         f"多 Agent 协作已启动（thread_id={thread_id}）。"
@@ -204,7 +211,10 @@ def main(argv: list[str] | None = None) -> int:
             parts = line.split(maxsplit=2)
             approved = len(parts) > 1 and parts[1].lower() in {"y", "yes"}
             note = parts[2] if len(parts) > 2 else ""
-            resume({"approved": approved, "note": note})
+            try:
+                resume({"approved": approved, "note": note})
+            except ValueError as exc:  # 没有挂起审批
+                print(f"无法恢复：{exc}", file=sys.stderr)
             continue
         run(line)
 

@@ -74,7 +74,7 @@ tests/
   test_registry.py   # 注册表行为
   test_graph.py      # 路由/失败隔离/持久化/审批/裁剪
   test_tools.py      # 定价工具
-  test_api.py        # HTTP API（提交 / 轮询 / 审批 / 错误映射）
+  test_api.py        # HTTP API（提交 / 轮询 / 审批 / 取消与回收 / 错误映射）
 ```
 
 流程：`START → supervisor → 某个专家 → supervisor → … → END`
@@ -200,6 +200,12 @@ multi-agent-api --log-level DEBUG                # 默认跟随 MULTI_AGENT_LOG_
 几点约定：
 
 - **任务表在进程内**：重启后 `GET /tasks` 不认识旧任务，但检查点在，可用 `multi-agent --resume <thread_id>` 接着跑；
+- **任务表会回收**：`--retention` 之后已结束任务从 `GET /tasks` 消失（再查 `404`）；表超过 `--max-records`
+  时只淘汰已结束记录，`queued` / `running` / `awaiting_approval` 不会被挤掉；待审批超过保留期转
+  `canceled`（`error="approval expired"`），先释放图实例与 SQLite 连接；
+- **取消是软取消**：`DELETE` 立即返回 `canceled`，但 Python 线程无法强杀，底层模型调用会继续到
+  `OPENAI_TIMEOUT`（默认 120s），结果被丢弃——这期间该 worker 仍被占用；
+- **执行超时**：`--task-timeout` 作用于 `queued` / `running`，批准审批后重新计时，超时 `error="task timed out after Ns"`；
 - **单进程**：任务并发由 `--max-workers` 控制，不要给 uvicorn 开多 worker（每个进程一份任务表）；
 - **审批串到同一条审计链路**：每次决策照旧追加 JSONL（`MULTI_AGENT_AUDIT_LOG`）；
 - **没有内置认证**：默认只监听回环地址，对外暴露请让反向代理做认证。
@@ -211,6 +217,7 @@ curl -s localhost:8000/tasks/api-1a2b3c4d
 curl -s localhost:8000/approvals
 curl -s -X POST localhost:8000/approvals/api-1a2b3c4d \
      -H 'content-type: application/json' -d '{"approved": true, "note": "复核通过"}'
+curl -s -X DELETE localhost:8000/tasks/api-1a2b3c4d   # 202 + canceled（软取消，幂等）
 ```
 
 ## 扩展
@@ -261,7 +268,7 @@ print(run_task("给笔记工具加一个删除接口", registry=registry))
 | `MULTI_AGENT_CHECKPOINT_DB` | SQLite 检查点路径；`memory` 表示不落盘 |
 | `MULTI_AGENT_NOTES_DIR` | 笔记目录，默认 `notes` |
 | `MULTI_AGENT_AUDIT_LOG` | 审批审计 JSONL 路径；`off` 关闭 |
-| `MULTI_AGENT_LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING`，默认 WARNING |
+| `MULTI_AGENT_LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`，默认 WARNING |
 | `MULTI_AGENT_API_HOST` | `multi-agent-api` 默认监听地址，默认 `127.0.0.1` |
 | `MULTI_AGENT_API_PORT` | `multi-agent-api` 默认端口，默认 `8000` |
 | `MULTI_AGENT_API_MAX_WORKERS` | `multi-agent-api` 并发任务数，默认 `4` |
@@ -306,7 +313,8 @@ mypy src       # 类型检查
 CI 在 Python 3.10 / 3.11 / 3.12 上跑同一套命令。测试覆盖：完整四跳路由、路由消息不外泄、
 专家失败隔离、max_turns 保护、非法路由降级、按 thread 保留历史、审批通过/拒绝/待审批、
 工具级审批拦截与放行、审计落盘、并行任务、上下文裁剪、定价工具边界，
-以及 HTTP API（提交与轮询、审批恢复、错误映射、参数校验）。
+HTTP API（提交与轮询、审批恢复、错误映射、参数校验、取消 / 超时 / 保留期回收 / 容量上限），
+以及真实图 + SQLite 的审批往返（含跨线程 `resume`）。
 
 API 测试用 `fastapi.testclient` + 假执行器，不联网；`.[dev]` 已包含 fastapi / httpx，
 跑真实服务才需要 `.[api]`（多一个 uvicorn）。
@@ -342,6 +350,9 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 - **跨重启的任务表**：API 的任务状态只在进程内，重启后旧任务查不到（检查点仍在，可 `--resume` 接着跑）。
   要长期查询就得把任务表落到 SQLite，并把检查点表当内部实现、不对外暴露。
 - **认证与限流**：API 没有鉴权、没有 CORS、没有限流，默认只监听回环地址，对外必须靠反向代理。
+- **硬中断执行**：`DELETE` 是软取消——记录立刻变 `canceled`、结果丢弃，但底层模型调用仍在跑，
+  要等 `OPENAI_TIMEOUT` 才释放 worker。真正的节点级中断需要把取消标志传进 `on_event`
+  并在每个节点检查，属于 `LangGraphExecutor` 的改动。
 - **图内 `Send` 扇出**：supervisor 一次只能选一个专家，多个独立子任务只能排队或走 `run_parallel`。
   改成 `Send` 扇出要注意状态合并——`messages` 用 `add_messages` 没问题，`turn` / `stop_reason` 是覆盖语义，
   并行分支会互相覆盖，得改成 `Annotated[..., operator.add]` 或只让 supervisor 写。

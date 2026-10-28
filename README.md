@@ -71,6 +71,7 @@ src/multi_agent/
 examples/
   ecommerce_team.py  # 跨境电商团队（含审批门）
 tests/
+  test_config.py     # Settings 校验（日志级别等）
   test_registry.py   # 注册表行为
   test_graph.py      # 路由/失败隔离/持久化/审批/裁剪
   test_tools.py      # 定价工具
@@ -305,7 +306,7 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 48 个离线测试，不消耗 API
+pytest -q      # 51 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
@@ -329,7 +330,7 @@ cd langgraph-multi-agent
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. 先跑离线测试，确认环境没问题（48 个，全部不联网）
+# 2. 先跑离线测试，确认环境没问题（51 个，全部不联网）
 pytest -q
 
 # 3. 配密钥

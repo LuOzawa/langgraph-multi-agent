@@ -7,7 +7,7 @@ import logging
 import os
 import sys
 
-from multi_agent.config import Settings
+from multi_agent.config import Settings, normalize_log_level
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -15,7 +15,6 @@ DEFAULT_MAX_WORKERS = 4
 DEFAULT_TASK_TIMEOUT = 1800.0
 DEFAULT_RETENTION = 86_400.0
 DEFAULT_MAX_RECORDS = 1000
-LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
 def _env_int(name: str, default: int, *, low: int, high: int | None = None) -> int:
@@ -153,9 +152,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"启动失败: {exc}", file=sys.stderr)
         return 1
 
-    level = (args.log_level or settings.log_level or "INFO").upper()
-    if level not in LOG_LEVELS:
-        print(f"启动失败: --log-level 非法，当前值: {level!r}", file=sys.stderr)
+    try:
+        level = normalize_log_level(args.log_level or settings.log_level)
+    except RuntimeError as exc:
+        print(f"启动失败: {exc}", file=sys.stderr)
         return 1
     logging.basicConfig(
         level=getattr(logging, level),

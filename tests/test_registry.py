@@ -1,4 +1,17 @@
-from multi_agent.registry import AgentRegistry, AgentSpec
+from multi_agent.registry import AgentRegistry, AgentSpec, _thinking_off_body
+
+
+def test_thinking_disabled_only_for_deepseek():
+    assert _thinking_off_body("https://api.deepseek.com/v1", "deepseek-v4-flash") == {
+        "thinking": {"type": "disabled"}
+    }
+    assert _thinking_off_body("https://api.example.com/v1", "deepseek-v4-flash") == {
+        "thinking": {"type": "disabled"}
+    }
+    assert _thinking_off_body("https://api.deepseek.com/v1", "some-model") == {
+        "thinking": {"type": "disabled"}
+    }
+    assert _thinking_off_body("https://api.openai.com/v1", "gpt-4o-mini") is None
 
 
 def test_register_and_list():

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -93,7 +95,9 @@ def test_run_cases_aggregates_limit_and_worker_order():
     )
 
     assert [item["id"] for item in report["results"]] == ["one", "two", "three"]
-    assert sorted(seen) == ["eval-one", "eval-three", "eval-two"]
+    assert all(tid.startswith("eval-") for tid in seen)
+    assert sorted(tid.rsplit("-", 1)[1] for tid in seen) == ["one", "three", "two"]
+    assert len(set(seen)) == 3
     assert report["summary"]["cases"] == 3
     assert report["summary"]["passed"] == 2
     assert report["summary"]["total_tokens"] == 21
@@ -158,6 +162,32 @@ def test_llm_judge_ignores_out_of_range_indexes():
     score, missing = judge("任务", "回答", [["甲"]])
     assert score == 1.0
     assert missing == []
+
+
+def test_run_cases_isolates_workspace(monkeypatch):
+    cases = [{"id": "iso", "task": "任务", "points": [["甲"]]}]
+    seen: dict[str, str] = {}
+    previous = os.environ.get("MULTI_AGENT_NOTES_DIR")
+
+    def runner(task: str, thread_id: str, settings, registry) -> RunResult:
+        notes_dir = Path(os.environ["MULTI_AGENT_NOTES_DIR"])
+        seen["notes"] = str(notes_dir)
+        seen["seeded"] = len(list(notes_dir.glob("*.md")))
+        seen["checkpoint"] = settings.checkpoint_db
+        seen["thread"] = thread_id
+        return _result("甲")
+
+    report = ev.run_cases(cases, settings=_settings(), runner=runner)
+
+    assert report["results"][0]["passed"] is True
+    assert "multi-agent-eval-" in seen["notes"]
+    assert seen["seeded"] >= 4  # README + docs 预置进工作区
+    assert seen["checkpoint"].endswith("checkpoints.sqlite")
+    assert "multi-agent-eval-" in seen["checkpoint"]
+    assert seen["thread"].startswith("eval-") and seen["thread"].endswith("-iso")
+    # 运行结束后恢复用户环境，不留下评测目录
+    assert os.environ.get("MULTI_AGENT_NOTES_DIR") == previous
+    assert not os.path.exists(os.path.dirname(seen["notes"]))
 
 
 def test_main_writes_report_and_strict_exit(monkeypatch, tmp_path):

@@ -110,6 +110,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--api-token",
+        default=os.getenv("MULTI_AGENT_API_TOKEN"),
+        help="API 访问令牌（也可用 MULTI_AGENT_API_TOKEN；留空不鉴权）",
+    )
+    parser.add_argument(
+        "--rate-limit",
+        type=int,
+        default=None,
+        help="每客户端 IP 每分钟请求上限，0 关闭（也可用 MULTI_AGENT_API_RATE_LIMIT）",
+    )
+    parser.add_argument(
         "--log-level",
         default=None,
         help="DEBUG/INFO/WARNING/ERROR/CRITICAL，默认跟随 MULTI_AGENT_LOG_LEVEL",
@@ -149,6 +160,12 @@ def main(argv: list[str] | None = None) -> int:
             else _env_int("MULTI_AGENT_API_MAX_RECORDS", DEFAULT_MAX_RECORDS, low=1)
         )
         _check_range("--max-records", records, low=1)
+        rate_limit = (
+            args.rate_limit
+            if args.rate_limit is not None
+            else _env_int("MULTI_AGENT_API_RATE_LIMIT", 0, low=0)
+        )
+        _check_range("--rate-limit", rate_limit, low=0)
     except ValueError as exc:
         print(f"启动失败: {exc}", file=sys.stderr)
         return 1
@@ -185,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
             retention=retention,
             max_records=records,
             task_db=args.task_db,
+            api_token=args.api_token,
+            rate_limit=rate_limit,
         )
     except (RuntimeError, ValueError) as exc:
         print(f"启动失败: {exc}", file=sys.stderr)

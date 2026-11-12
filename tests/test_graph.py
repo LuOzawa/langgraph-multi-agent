@@ -737,6 +737,111 @@ def test_routing_guard_caps_review_rejections():
     assert G._routing_guard(G.FINISH, state, registry, names, 1) == (G.FINISH, "")
 
 
+def test_trim_fallback_does_not_orphan_tool_messages(monkeypatch):
+    """预算兜底裁剪时，不能把 AIMessage(tool_calls) 与 ToolMessage 拆散。
+
+    OpenAI 兼容接口要求 ToolMessage 必须紧跟产生它的 tool_call；
+    裁掉 AIMessage 却留下 ToolMessage，模型端会直接 400。
+    """
+    settings = _settings(context_max_tokens=20)
+
+    def boom(*args: object, **kwargs: object) -> list:
+        raise RuntimeError("trim_messages 不可用")
+
+    import langchain_core.messages as lc_messages
+
+    monkeypatch.setattr(lc_messages, "trim_messages", boom, raising=False)
+
+    tool_call = {"id": "call_1", "name": "calc", "type": "tool_call", "args": {"x": 1}}
+    messages = [
+        HumanMessage(content="任务" * 40),
+        AIMessage(content="", tool_calls=[tool_call]),
+        ToolMessage(content="123", tool_call_id="call_1"),
+        AIMessage(content="草稿" * 5, name="writer"),
+    ]
+
+    # 前提：确实进入裁剪分支，否则这个测试证明不了任何事
+    assert G._count_tokens(FakeChatModel(), messages) > settings.context_max_tokens
+
+    trimmed = G._trim_for_model(messages, FakeChatModel(), settings)
+
+    announced = {
+        str(call.get("id"))
+        for message in trimmed
+        if isinstance(message, AIMessage)
+        for call in (getattr(message, "tool_calls", None) or [])
+    }
+    orphans = [
+        message
+        for message in trimmed
+        if isinstance(message, ToolMessage) and str(message.tool_call_id) not in announced
+    ]
+    assert orphans == []
+
+
+def test_drop_orphan_tool_messages_handles_both_directions():
+    """两个方向的残缺都要修：孤立的 ToolMessage、缺响应的 tool_calls。"""
+    call = {"id": "call_x", "name": "calc", "type": "tool_call", "args": {}}
+
+    paired = [
+        AIMessage(content="", tool_calls=[call]),
+        ToolMessage(content="ok", tool_call_id="call_x"),
+    ]
+    kept = G._drop_orphan_tool_messages(paired)
+    assert len(kept) == 2
+    assert kept[0].tool_calls == [call]  # 配对完整时不动
+
+    orphan_response = G._drop_orphan_tool_messages(
+        [ToolMessage(content="ok", tool_call_id="call_x")]
+    )
+    assert orphan_response == []
+
+    orphan_call = G._drop_orphan_tool_messages([AIMessage(content="", tool_calls=[call])])
+    assert len(orphan_call) == 1
+    assert orphan_call[0].tool_calls == []
+
+
+def test_trim_main_path_also_has_no_orphans():
+    """trim_messages 可用时同样要保证配对完整。"""
+    settings = _settings(context_max_tokens=60)
+    messages = [
+        SystemMessage(content="你是调度器"),
+        HumanMessage(content="任务" * 20),
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "calc", "type": "tool_call", "args": {}}]),
+        ToolMessage(content="结果", tool_call_id="c1"),
+        AIMessage(content="草稿" * 40, name="writer"),
+        AIMessage(content="更多" * 40, name="writer"),
+    ]
+    assert G._count_tokens(FakeChatModel(), messages) > settings.context_max_tokens
+
+    trimmed = G._trim_for_model(messages, FakeChatModel(), settings)
+
+    announced = {
+        str(call.get("id"))
+        for message in trimmed
+        if isinstance(message, AIMessage)
+        for call in (getattr(message, "tool_calls", None) or [])
+    }
+    orphans = [
+        message
+        for message in trimmed
+        if isinstance(message, ToolMessage) and str(message.tool_call_id) not in announced
+    ]
+    assert orphans == []
+
+
+def test_parse_first_json_skips_braces_in_prose():
+    """模型常在 JSON 前解释一句，句子里还带花括号；只认第一个 "{" 会直接失败。"""
+    text = '我这样理解 {这一步是路由}，输出如下：\n{"next_agent": "FINISH", "reason": "已有正文"}'
+
+    assert G._parse_first_json(text) == {"next_agent": "FINISH", "reason": "已有正文"}
+
+
+def test_parse_first_json_returns_none_when_no_json():
+    assert G._parse_first_json("完全没有 JSON") is None
+    assert G._parse_first_json("{坏掉的") is None
+
+
 def test_routing_guard_end_to_end_switches_to_writer(monkeypatch):
     called: list[str] = []
     _recording_agents(monkeypatch, called)

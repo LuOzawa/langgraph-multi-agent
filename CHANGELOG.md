@@ -43,6 +43,9 @@
   （默认 1）；同一专家不连任（失败重试除外），reviewer 驳回达上限后直接收尾
 - README 重组：`快速开始（克隆到跑通）` 六步清单 + `现状与完成度`（自评约 78%）+ `上线前你还需要自己做的`；
   结构树补齐 `api/store.py`、`evals/`、`tests/test_evals.py`
+- 图编排拆分：`context_window.py`（消息转文本 / token 计数 / 裁剪）、`routing.py`（路由 schema、提示词、
+  确定性护栏、降级解析）、`constants.py`（共用常量）；`graph.py` 只剩编排与执行（956 → 约 700 行），
+  原有私有函数仍从 `multi_agent.graph` 重导出，调用方与测试无需改动
 
 ### Fixed
 - 取消竞态：`DELETE` 落在「已批准、resume 未开始」之间时，已批准的高风险动作仍会执行。
@@ -68,6 +71,17 @@
   修复带 tools 时第二轮 400（`reasoning_content must be passed back`）
 - `evals/` 每次运行使用独立临时检查点库与笔记目录（跑完删除），thread_id 带随机前缀，
   不再污染 `.multi_agent/`、`notes/` 或复用旧 checkpoint
+- 上下文裁剪曾拆散 tool_call 与 ToolMessage：`trim_messages` 兜底按条数切片时可能留下无前驱的
+  `ToolMessage`，或留下响应已被裁掉的 `tool_calls`，OpenAI 兼容接口会直接 400。现由
+  `_drop_orphan_tool_messages` 双向修补；兜底分支也从"固定取最后 N 条"改为按预算从尾部收缩，
+  避免截完仍超预算
+- 审计日志并发丢行：`run_parallel` 的多个任务同写一个 JSONL，Windows 上 append 非原子，
+  实测 400 条只剩 151 条、其中 45 行坏 JSON。改为 `record_approval` 全程持进程内写锁
+  （跨进程并发仍不保证，已在注释中声明）
+- `read_note` 会把任意大小的笔记整份读进模型上下文。增加 `MAX_NOTE_CHARS`（20 万字符）上限，
+  超限截断并提示全文大小
+- `_parse_first_json` 只认第一个 `{`：模型在 JSON 前解释一句且句子里带花括号时（如
+  「我这样理解 {这一步是路由}」），降级路由会直接解析失败并终止任务。改为逐个 `{` 起点尝试解析
 
 ## [0.4.0] - 2026-10-27
 

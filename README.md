@@ -235,7 +235,11 @@ from multi_agent.graph import run_parallel
 results = run_parallel(["上架 SKU-1", "上架 SKU-2"], max_workers=2)
 ```
 
-每个任务独立 thread 与 SQLite 连接。这不是图内 `Send` 扇出，专家之间不会并行。
+每个任务独立 `thread_id`。检查点连接按数据库路径复用：文件后端下所有任务共用同一条
+SQLite 连接，`SqliteSaver` 的内部锁会把检查点写入串行化。压测（8 个任务、假模型空转）：
+文件后端并发耗时是串行的 **1.11x**，`memory` 后端是 **0.76x**——但真实负载里每次模型调用
+是秒级、检查点写入只有毫秒级，这个串行化基本可以忽略；纯计算型批量任务可以临时用
+`MULTI_AGENT_CHECKPOINT_DB=memory`。这不是图内 `Send` 扇出，专家之间不会并行。
 
 ### 上下文预算
 

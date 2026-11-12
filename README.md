@@ -63,7 +63,7 @@ curl -s localhost:8000/health        # {"status":"ok"}
 **6. 跑离线测试（可选）**
 
 ```bash
-pytest -q    # 100 passed，不联网、不消耗 token
+pytest -q    # 111 passed，不联网、不消耗 token
 ```
 
 ## 现状与完成度
@@ -73,7 +73,7 @@ pytest -q    # 100 passed，不联网、不消耗 token
 
 | 模块 | 完成度 | 依据 | 还差 |
 | --- | --- | --- | --- |
-| 核心图（路由 / 审批 / 检查点 / 预算 / 隔离） | 100% | 100 个离线测试；真实模型 10/10 | — |
+| 核心图（路由 / 审批 / 检查点 / 预算 / 隔离） | 100% | 111 个离线测试；真实模型 10/10 | — |
 | HTTP API（任务 / 审批 / 取消 / 持久化 / 鉴权 / 限流 / health） | 95% | 含重启恢复与并发用例 | 多副本、CORS |
 | 工程化（CI 3 版本 + packaging、类型、元数据） | 90% | CI 全绿、wheel 可装 | 覆盖率门禁、发布流程 |
 | 文档与示例 | 95% | README / docs 与实现逐项核对 | 更多行业示例 |
@@ -149,8 +149,9 @@ tests/
   test_config.py     # Settings 校验（日志级别、驳回上限）
   test_cli.py        # CLI 退出码与审批提示
   test_registry.py   # 注册表行为与 role 校验
-  test_graph.py      # 路由/护栏/失败隔离/持久化/审批/裁剪
-  test_tools.py      # 定价工具
+  test_graph.py      # 路由/护栏/失败隔离/持久化/审批/裁剪配对/审批标记
+  test_tools.py      # 定价工具 + 笔记工具（含读取截断）
+  test_audit.py      # 审批审计并发写（不丢行、不写坏行）
   test_api.py        # HTTP API（提交 / 轮询 / 审批 / 取消与回收 / 鉴权 / 错误映射）
   test_evals.py      # 评测打分、判分与工作区隔离
 ```
@@ -199,6 +200,8 @@ AgentSpec(
 机制：未批准时工具被包裹成「只回标记、不执行」；supervisor 收到标记后转审批节点，
 批准后把该工具加入 `approved_tools` 并重跑该专家，工具才真正执行。
 审批前会附带 `preview`（即将提交的内容）供人核对。
+标记按**已注册的工具名**校验：只有该专家 `approval_tools` 里列出的名字才算数，
+工具输出回显外部内容时伪造的 `REQUIRES_APPROVAL::<任意工具名>::{}` 会被丢弃并记 warning。
 
 #### 恢复挂起的审批
 
@@ -224,6 +227,8 @@ result = resume_task(thread_id, {"approved": True, "note": "复核通过"}, app=
 
 每次审批决策追加一行 JSONL（`MULTI_AGENT_AUDIT_LOG`，默认 `.multi_agent/approvals.jsonl`）：
 时间、thread、专家、是否批准、备注、任务摘要。写盘失败只告警，不中断业务。
+并发写有进程内锁保护——`run_parallel` 的多个任务同写一个文件时不会丢行或写坏行；
+跨进程（多开进程写同一文件）不保证，生产环境请让审计文件只由单一进程写入。
 
 ### 并行任务
 
@@ -410,14 +415,16 @@ python examples/ecommerce_team.py "帮我把这款收纳盒上架到亚马逊美
 ## 测试与检查
 
 ```bash
-pytest -q      # 100 个离线测试，不消耗 API
+pytest -q      # 111 个离线测试，不消耗 API
 ruff check .   # 静态检查
 mypy src       # 类型检查
 ```
 
 CI 在 Python 3.10 / 3.11 / 3.12 上跑同一套命令。测试覆盖：完整四跳路由、路由消息不外泄、
 专家失败隔离、max_turns 保护、非法路由降级、按 thread 保留历史、审批通过/拒绝/待审批、
-工具级审批拦截与放行、审计落盘、并行任务、上下文裁剪、定价工具边界，
+工具级审批拦截与放行、审批标记来源校验、审计落盘与并发写不丢行、并行任务、上下文裁剪、
+裁剪后 tool_call 与 ToolMessage 配对完整、JSON 降级解析能在散文里定位 JSON、
+定价工具边界、笔记工具读取截断，
 HTTP API（提交与轮询、审批恢复、错误映射、参数校验、取消 / 超时 / 保留期回收 / 容量上限），
 以及真实图 + SQLite 的审批往返（含跨线程 `resume`）。
 
@@ -448,7 +455,7 @@ CI 不跑评测（需要真实 key 与预算），只跑离线测试；改 promp
 
 ## 开发者补充
 
-- 离线测试不联网、不消耗 token：`pytest -q`（100 个）；`ruff check .` 与 `mypy src` 是 CI 同款命令。
+- 离线测试不联网、不消耗 token：`pytest -q`（111 个）；`ruff check .` 与 `mypy src` 是 CI 同款命令。
 - 示例团队需要交互确认审批，非交互环境（CI / 管道）会默认拒绝；要跑通请用真实终端或 `--auto-approve`。
 - 评测会真实调用模型并消耗 token：`python evals/run.py --limit 3`，报告落在 `evals/report.json`（已 gitignore）。
 

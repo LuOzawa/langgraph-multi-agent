@@ -7,6 +7,8 @@
 4. 路由枚举由注册表动态生成；structured output 不可用时退化为 JSON 解析。
 5. 单个专家失败不拖垮整轮，错误作为消息交回 supervisor。
 6. 每轮写日志，run_task_full 支持 on_event 进度回调。
+7. 上下文裁剪与路由决策已拆到 context_window / routing；本模块只保留编排与执行，
+   并把原私有函数重新导出，避免破坏既有调用方与测试。
 """
 
 from __future__ import annotations
@@ -16,24 +18,83 @@ import logging
 import sqlite3
 import threading
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command, interrupt
-from pydantic import BaseModel, Field, create_model
 
 from multi_agent.audit import record_approval
 from multi_agent.config import Settings
+from multi_agent.constants import (
+    APPROVAL_EVENT,
+    APPROVAL_MARK,
+    FINISH,
+    SUPERVISOR,
+)
+from multi_agent.context_window import (
+    _count_tokens as _count_tokens,
+)
+from multi_agent.context_window import (
+    _drop_orphan_tool_messages as _drop_orphan_tool_messages,
+)
+from multi_agent.context_window import (
+    _shrink_window as _shrink_window,
+)
+from multi_agent.context_window import (
+    _trim_for_model as _trim_for_model,
+)
+from multi_agent.context_window import (
+    message_text as message_text,
+)
 from multi_agent.registry import AgentRegistry, default_registry, make_llm
+from multi_agent.routing import (
+    _business_messages as _business_messages,
+)
+from multi_agent.routing import (
+    _count_rejections as _count_rejections,
+)
+from multi_agent.routing import (
+    _decide as _decide,
+)
+from multi_agent.routing import (
+    _decide_json as _decide_json,
+)
+from multi_agent.routing import (
+    _first_role as _first_role,
+)
+from multi_agent.routing import (
+    _is_rejection as _is_rejection,
+)
+from multi_agent.routing import (
+    _last_expert_message as _last_expert_message,
+)
+from multi_agent.routing import (
+    _last_output as _last_output,
+)
+from multi_agent.routing import (
+    _parse_first_json as _parse_first_json,
+)
+from multi_agent.routing import (
+    _role_of as _role_of,
+)
+from multi_agent.routing import (
+    _route_schema as _route_schema,
+)
+from multi_agent.routing import (
+    _routing_guard as _routing_guard,
+)
+from multi_agent.routing import (
+    _supervisor_prompt as _supervisor_prompt,
+)
 from multi_agent.state import TeamState
 
 _create_agent: Any = None
@@ -46,9 +107,8 @@ except Exception:  # pragma: no cover - 取决于安装版本
 
 log = logging.getLogger("multi_agent")
 
-FINISH = "FINISH"
-SUPERVISOR = "supervisor"
-_APPROVAL_MARK = "REQUIRES_APPROVAL::"
+_APPROVAL_MARK = APPROVAL_MARK
+_APPROVAL_EVENT = APPROVAL_EVENT
 _APPROVED_TOOLS: ContextVar[frozenset[str]] = ContextVar(
     "multi_agent_approved_tools", default=frozenset()
 )
@@ -89,294 +149,12 @@ def _approval_markers(messages: list[Any]) -> list[tuple[str, dict[str, Any]]]:
     return found
 
 
-def message_text(message: Any) -> str:
-    """把 AIMessage.content（str 或 content blocks 列表）转成纯文本。"""
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict):
-                if block.get("type") == "text":
-                    parts.append(str(block.get("text", "")))
-                elif "text" in block:
-                    parts.append(str(block.get("text", "")))
-        return "\n".join(part for part in parts if part)
-    return str(content)
-
-
 def _final_ai(messages: list[Any]) -> Any | None:
     """取最后一条没有 tool_calls 的 AIMessage；没有则退回最后一条消息。"""
     for message in reversed(messages):
         if isinstance(message, AIMessage) and not getattr(message, "tool_calls", None):
             return message
     return messages[-1] if messages else None
-
-
-def _business_messages(state: TeamState) -> list[Any]:
-    """专家可见消息：过滤 supervisor 的路由记录，避免污染上下文。"""
-    messages = list(state.get("messages") or [])
-    visible = [m for m in messages if getattr(m, "name", None) != SUPERVISOR]
-    return visible or messages
-
-
-def _count_tokens(llm: Any, messages: list[Any]) -> int:
-    try:
-        return int(llm.get_num_tokens_from_messages(messages))
-    except Exception:  # 假模型/不支持计数的模型，用字符数估算
-        return sum(len(message_text(m)) for m in messages) // 2 + 1
-
-
-def _trim_for_model(messages: list[Any], llm: Any, settings: Settings) -> list[Any]:
-    """按 token 预算裁剪历史，保留首条任务消息。
-
-    MULTI_AGENT_CONTEXT_TOKENS=0 时关闭裁剪。
-    """
-    budget = settings.context_max_tokens
-    if budget <= 0 or not messages:
-        return messages
-    if _count_tokens(llm, messages) <= budget:
-        return messages
-
-    trimmed: list[Any]
-    try:
-        from langchain_core.messages import trim_messages
-
-        trimmed = list(
-            trim_messages(
-                messages,
-                max_tokens=budget,
-                strategy="last",
-                token_counter=lambda msgs: _count_tokens(llm, msgs),
-                start_on="human",
-                include_system=True,
-            )
-        )
-    except Exception:
-        log.warning("trim_messages 不可用，退回按条数裁剪")
-        trimmed = messages[-max(2, budget // 200):]
-
-    first_human = next((m for m in messages if isinstance(m, HumanMessage)), None)
-    if first_human is not None and all(m is not first_human for m in trimmed):
-        trimmed = [
-            first_human,
-            AIMessage(content="（为控制上下文长度，已省略部分较早消息）", name=SUPERVISOR),
-            *trimmed,
-        ]
-    log.info("上下文裁剪: %d -> %d 条（预算 %d tokens）", len(messages), len(trimmed), budget)
-    return trimmed
-
-
-def _last_output(state: TeamState) -> str:
-    """给审批人看的“将要提交的内容”预览。"""
-    for message in reversed(list(state.get("messages") or [])):
-        if isinstance(message, AIMessage) and getattr(message, "name", None) not in {
-            SUPERVISOR,
-            "approval",
-        }:
-            return message_text(message)[:1500]
-    return ""
-
-
-def _route_schema(agent_names: list[str]) -> type[BaseModel]:
-    allowed = tuple(agent_names) + (FINISH,)
-    NextAgent = Literal[allowed]  # type: ignore[valid-type]
-    return create_model(
-        "RouteDecision",
-        next_agent=(
-            NextAgent,
-            Field(description="下一个要执行的专家名；FINISH 表示现有产出已足以收尾"),
-        ),
-        reason=(
-            str,
-            Field(
-                description=(
-                    "一句话，不超过 30 字：已有产出或缺口 → 这一步要它做什么。"
-                    "不要复述任务、不要列计划"
-                )
-            ),
-        ),
-    )
-
-
-def _supervisor_prompt(registry: AgentRegistry, agent_names: list[str]) -> SystemMessage:
-    options = ", ".join(agent_names + [FINISH])
-    # 规则按职责语义判定，不写死默认三专家；默认团队在场时只补一句精确定位
-    hint = ""
-    if {"researcher", "writer", "reviewer"} <= set(agent_names):
-        hint = "（默认团队中：调研型=researcher，产出型=writer，审查型=reviewer）"
-    rules = [
-        "你是 Supervisor，只负责把任务分给专家；你不写正文、不补内容、不排多步计划。",
-        f"可选对象: {options}",
-        f"专家职责:\n{registry.descriptions_block()}",
-        "角色判定（按上方职责表的实际措辞判断，不要只按名字猜）: "
-        "交付事实或要点的是调研型；交付正文或成品的是产出型；"
-        "判断通过或驳回的是审查型；执行外部动作的是执行型。" + hint,
-        "历史读法: 每条专家消息的 name 就是它的身份；一条失败记录（正文含「执行失败」）"
-        "同样代表上一位专家。name 为 approval 的消息是审批结果通知，不是专家产出。"
-        "你看不到自己写过的路由理由，只能从专家产出的内容和顺序判断进度。",
-        "规则（按顺序判断，先命中先执行）:",
-        "1. 一次只选一个对象，或 FINISH；不要一次派多个。",
-        "2. FINISH 的判据（满足一条即可）: "
-        "(a) 最近一条专家消息是可交付正文——能原样作为答复交给用户，且已覆盖任务里的每个问句；"
-        "(b) 审查型专家明确给出通过结论（默认团队写作「审查通过」）。"
-        "要点清单、未知项清单、返工分派单、内部待办都不算可交付正文：遇到这类消息，"
-        "先派产出型专家写成正文，再 FINISH。任务本身只要求要点或清单时，"
-        "结构化的要点可以算正文，但仍须覆盖每个问句。"
-        "不要为了「再确认一下」「再补一个角度」而多派一轮。",
-        "3. 不连任: 若最后一条专家消息的 name 与这次要选的对象相同，且那条不是失败记录，"
-        "改选其他专家或 FINISH；同一专家不得连续出现两次。",
-        "4. 按需选人，不必把所有人走一遍: 纯写作或改写交给产出型；"
-        "需要读资料、补事实或做测算才派对应的调研型，同一缺口只派一次；"
-        "只有任务明确要求审查，或产出是高危交付物时才派审查型。"
-        "已有可交付正文能让任务收尾时直接 FINISH（清单类产出不算，见规则 2）。"
-        "若职责表里根本没有产出型，退化为：选最合适的一位产出后 FINISH。",
-        "5. 审查型专家驳回后，下一位不能还是它: 必须是产出型，"
-        "或能补上所指缺口的调研型；拿到新的产出之后，才允许再次派它。",
-        "6. 返工有上限: 历史里不含通过结论的审查消息已有两条，就停止返工；"
-        "若最近一条不是可交付正文，先派产出型按现有材料写正文，再 FINISH，"
-        "把未解决项写进 reason。",
-        "7. 专家报错（消息含「执行失败」）时最多换人重试一次；"
-        "若已有可交付正文，直接 FINISH。",
-        "8. reason 只写一句、不超过 30 字，格式「已有什么/还缺什么 → 派它做什么」；"
-        "不复述任务、不列多步计划、不评价文风。",
-    ]
-    return SystemMessage(content="\n".join(rules))
-
-
-def _role_of(registry: AgentRegistry, name: str | None) -> str | None:
-    if not name:
-        return None
-    try:
-        return registry.get(name).role
-    except KeyError:
-        return None
-
-
-def _last_expert_message(messages: list[Any]) -> Any | None:
-    for message in reversed(messages):
-        if isinstance(message, AIMessage) and getattr(message, "name", None) not in {
-            SUPERVISOR,
-            "approval",
-        }:
-            return message
-    return None
-
-
-def _count_rejections(messages: list[Any], registry: AgentRegistry) -> int:
-    return sum(
-        1
-        for message in messages
-        if isinstance(message, AIMessage)
-        and _role_of(registry, getattr(message, "name", None)) == "reviewer"
-        and _is_rejection(message)
-    )
-
-
-def _first_role(registry: AgentRegistry, agent_names: list[str], role: str) -> str | None:
-    for name in agent_names:
-        if _role_of(registry, name) == role:
-            return name
-    return None
-
-
-def _routing_guard(
-    nxt: str,
-    state: Mapping[str, Any],
-    registry: AgentRegistry,
-    agent_names: list[str],
-    max_rejections: int,
-) -> tuple[str, str]:
-    """确定性护栏：不连任、驳回上限。返回（新目标, 说明）。"""
-    if nxt == FINISH:
-        return nxt, ""
-    messages = list(state.get("messages") or [])
-
-    if _role_of(registry, nxt) == "reviewer":
-        rejections = _count_rejections(messages, registry)
-        if rejections >= max_rejections:
-            return FINISH, f"审查已驳回 {rejections} 次，停止返工"
-
-    last = _last_expert_message(messages)
-    last_name = getattr(last, "name", None) if last is not None else None
-    if last is None or nxt != last_name:
-        return nxt, ""
-    if "执行失败" in message_text(last):
-        return nxt, ""  # 失败后允许同一专家重试一次
-    if _role_of(registry, last_name) == "researcher":
-        writer = _first_role(registry, agent_names, "writer")
-        if writer is not None:
-            return writer, "避免连任，改由 writer 成稿"
-    return FINISH, "避免连任同一专家"
-
-
-def _decide(
-    llm: Any,
-    schema: type[BaseModel],
-    registry: AgentRegistry,
-    agent_names: list[str],
-    history: list[Any],
-) -> BaseModel:
-    prompt = _supervisor_prompt(registry, agent_names)
-    try:
-        router = llm.with_structured_output(schema)
-        return router.invoke([prompt, *history])
-    except Exception as exc:  # 中转不支持 function calling / response_format
-        log.warning("structured output 不可用（%s: %s），退化为 JSON 解析", type(exc).__name__, exc)
-        return _decide_json(llm, schema, prompt, history, agent_names)
-
-
-def _parse_first_json(text: str) -> dict[str, Any] | None:
-    """从模型输出里取第一个 JSON 对象（容忍代码围栏与前后废话）。"""
-    start = text.find("{")
-    if start < 0:
-        return None
-    try:
-        value, _ = json.JSONDecoder().raw_decode(text[start:])
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _decide_json(
-    llm: Any,
-    schema: type[BaseModel],
-    prompt: SystemMessage,
-    history: list[Any],
-    agent_names: list[str],
-) -> BaseModel:
-    allowed = list(agent_names) + [FINISH]
-    allowed_text = ", ".join(allowed)
-    ask = HumanMessage(
-        content=(
-            "只输出一个 JSON 对象，不要解释、不要代码块。\n"
-            f"next_agent 只能取以下值之一：{allowed_text}\n"
-            '示例：{"next_agent": "FINISH", "reason": "已有可交付正文"}'
-        )
-    )
-    text = message_text(llm.invoke([prompt, *history, ask]))
-    data = _parse_first_json(text)
-    if data is None:
-        raise ValueError(f"无法从模型输出解析路由: {text[:200]!r}")
-    try:
-        return schema(**data)
-    except Exception as exc:  # 非法值：带上合法清单重试一次
-        retry = HumanMessage(
-            content=(
-                f"上一次输出不合法（{exc}）。next_agent 只能是：{allowed_text}。"
-                "只输出 JSON 对象。"
-            )
-        )
-        retried = message_text(
-            llm.invoke([prompt, *history, ask, AIMessage(content=text), retry])
-        )
-        data = _parse_first_json(retried)
-        if data is None:
-            raise ValueError(f"无法从模型输出解析路由: {retried[:200]!r}") from exc
-        return schema(**data)
 
 
 _SAVER_CACHE: dict[str, Any] = {}
@@ -696,28 +474,12 @@ class RunResult:
 EventCallback = Callable[[str, dict[str, Any]], None]
 Approver = Callable[[dict[str, Any]], Any]
 
-_APPROVAL_EVENT = "__interrupt__"
-
 
 def run_config(settings: Settings, thread_id: str) -> dict[str, Any]:
     return {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": max(2 * settings.max_turns + 5, 25),
     }
-
-
-def _is_rejection(message: Any) -> bool:
-    """判断一条消息是不是审查驳回，而不是可交付草稿。"""
-    text = message_text(message).strip()
-    if not text:
-        return False
-    head = text[:200]
-    first = text.splitlines()[0]
-    return (
-        first.startswith(("# 审查意见", "审查意见"))
-        or "审查结论" in head
-        or "需返工" in text[-200:]
-    )
 
 
 def _final_answer(state: dict[str, Any]) -> str:

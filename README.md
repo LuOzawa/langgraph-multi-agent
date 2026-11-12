@@ -124,8 +124,11 @@ python -m multi_agent
 src/multi_agent/
   config.py          # 环境变量与 Settings
   state.py           # 共享状态（messages / task / turn / stop_reason）
+  constants.py       # 共用常量（FINISH / supervisor / 审批标记）
+  context_window.py  # 消息转文本、token 计数、上下文裁剪（保证 tool_call 配对）
+  routing.py         # 路由 schema、supervisor 提示词、确定性护栏、降级解析
   registry.py        # Agent 注册表与模型工厂
-  graph.py           # 图编排、检查点、路由、审批、并发
+  graph.py           # 图编排、检查点、审批节点、并发执行
   audit.py           # 审批审计（JSONL）
   agents/defaults.py # 示例专家
   tools/workspace.py # 示例工具（本地笔记）
@@ -154,7 +157,8 @@ tests/
 
 流程：`START → supervisor → 某个专家 → supervisor → … → END`
 
-读代码顺序：`state.py`（状态契约）→ `graph.py`（路由 / 护栏 / 审批 / 裁剪）→ `registry.py`（怎么加专家）→
+读代码顺序：`state.py`（状态契约）→ `graph.py`（编排 / 审批 / 检查点）→ `routing.py`（路由与护栏）→
+`context_window.py`（上下文预算）→ `registry.py`（怎么加专家）→
 `cli.py`（命令行入口）→ `api/`（HTTP 入口）→ `evals/run.py`（怎么衡量好坏）。
 
 ## 核心机制

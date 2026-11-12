@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,11 @@ from multi_agent.config import Settings
 log = logging.getLogger("multi_agent.audit")
 
 _DISABLED = {"", "off", "none", "false"}
+
+# run_parallel 会把多个任务丢进线程池、同写一个审计文件；
+# Windows 上 `open("a")` + write 并非原子追加，实测 400 条只剩 151 条、45 行坏 JSON。
+# 这里用进程内锁串行化写入（跨进程并发不在本模块保证范围内）。
+_WRITE_LOCK = threading.Lock()
 
 
 def record_approval(
@@ -38,10 +44,12 @@ def record_approval(
         "task": str(payload.get("task", ""))[:500],
     }
     path = Path(target).expanduser()
+    line = json.dumps(record, ensure_ascii=False) + "\n"
     try:
-        if str(path.parent) not in {"", "."}:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with _WRITE_LOCK:
+            if str(path.parent) not in {"", "."}:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
     except OSError as exc:  # 审计失败不应中断业务
         log.warning("写审批日志失败（%s）: %s", target, exc)

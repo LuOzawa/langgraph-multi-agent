@@ -1,4 +1,31 @@
 from multi_agent.tools.ecommerce import calc_landed_cost
+from multi_agent.tools.workspace import MAX_NOTE_CHARS, workspace_tools
+
+
+def _workspace_tools() -> dict:
+    return {item.name: item for item in workspace_tools()}
+
+
+def test_workspace_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTI_AGENT_NOTES_DIR", str(tmp_path))
+    tools = _workspace_tools()
+
+    tools["save_note"].invoke({"title": "周报", "content": "本周完成 3 项"})
+
+    assert "本周完成 3 项" in tools["read_note"].invoke({"title": "周报"})
+    assert "周报" in tools["list_notes"].invoke({})
+
+
+def test_read_note_truncates_oversized_note(tmp_path, monkeypatch):
+    """笔记目录可能是用户手放的，超大文件不能整份灌进模型上下文。"""
+    monkeypatch.setenv("MULTI_AGENT_NOTES_DIR", str(tmp_path))
+    tools = _workspace_tools()
+    (tmp_path / "big.md").write_text("啊" * (MAX_NOTE_CHARS + 100), encoding="utf-8")
+
+    out = tools["read_note"].invoke({"title": "big"})
+
+    assert "已截断" in out
+    assert len(out) <= MAX_NOTE_CHARS + 200
 
 
 def test_landed_cost_math():

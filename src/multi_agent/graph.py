@@ -131,8 +131,15 @@ def _guarded_tool(original: BaseTool) -> BaseTool:
     )
 
 
-def _approval_markers(messages: list[Any]) -> list[tuple[str, dict[str, Any]]]:
-    """从工具返回里找出“需要审批”的标记。"""
+def _approval_markers(
+    messages: list[Any], allowed: set[str] | None = None
+) -> list[tuple[str, dict[str, Any]]]:
+    """从工具返回里找出“需要审批”的标记。
+
+    allowed 是本轮真正挂了审批闸的工具名，只认这些名字。否则某个工具把外部内容
+    原样回显（marker 前缀 + 任意工具名）时，就能伪造一次审批请求，并借人类点
+    “通过”把那个名字塞进 `approved_tools`，后续调用就不再经过审批。
+    """
     found: list[tuple[str, dict[str, Any]]] = []
     for message in messages:
         if not isinstance(message, ToolMessage):
@@ -144,6 +151,9 @@ def _approval_markers(messages: list[Any]) -> list[tuple[str, dict[str, Any]]]:
             _, tool, raw = content.split("::", 2)
             args = json.loads(raw) if raw else {}
         except (ValueError, json.JSONDecodeError):
+            continue
+        if allowed is not None and tool not in allowed:
+            log.warning("忽略未注册的审批标记: %s", tool)
             continue
         found.append((tool, args if isinstance(args, dict) else {}))
     return found
@@ -207,6 +217,7 @@ def build_graph(
     route_schema = _route_schema(agent_names)
     worker_graphs: dict[str, Any] = {}
     worker_specs: dict[str, Any] = {}
+    guarded_names: dict[str, set[str]] = {}
     approval_targets = {
         name: name for name in agent_names
     }  # 默认直连；需要审批的专家在下面改写
@@ -231,6 +242,7 @@ def build_graph(
                     f"（可用: {sorted(available)}）"
                 )
             guarded = set(spec.approval_tools)
+            guarded_names[name] = guarded
             tools = [_guarded_tool(item) if item.name in guarded else item for item in tools]
         if _create_agent is not None:
             worker_graphs[name] = _create_agent(llm, tools, system_prompt=spec.system_prompt)
@@ -411,7 +423,9 @@ def build_graph(
                     },
                 )
 
-            markers = _approval_markers(list(result.get("messages") or []))
+            markers = _approval_markers(
+                list(result.get("messages") or []), guarded_names.get(name)
+            )
             if markers:
                 tool_name, tool_args = markers[0]
                 log.info("工具需要审批: %s", tool_name)
